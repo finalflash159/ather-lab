@@ -1,5 +1,6 @@
 """Versioned skill tasks using the existing MiniGrid dynamics and public sensor."""
 
+from dataclasses import replace
 from functools import lru_cache
 
 import gymnasium as gym
@@ -14,6 +15,9 @@ from ather_exploration.worlds.validation import validate_scenario
 
 TASKS = ("P1a", "P1b", "P2a", "P2b", "P3", "P4a", "P4b")
 HORIZONS = dict(zip(TASKS, (32, 32, 96, 96, 256, 128, 256), strict=True))
+# Easy geometry in P5a uses a small-target budget. Actual target banks retain their H.
+PHASE_HORIZONS = {**HORIZONS, "P5a": 256, "P5b": 256}
+EARLY_SUCCESS_PHASES = frozenset(("P1a", "P1b", "P2a", "P2b", "P4a"))
 
 
 def wall_mask(observation):
@@ -166,9 +170,12 @@ def skill_scenario(task, seed):
 
 
 class SkillEnv(gym.Wrapper):
-    def __init__(self, task, seed, reward=None, first_visit=False):
+    def __init__(self, task, seed, reward=None, first_visit=False, step_cost=0.0, *, phase=None):
         self.task, self.task_seed = task, seed
-        scenario = skill_scenario(task, seed)
+        self.phase = phase or task
+        if self.phase not in PHASE_HORIZONS:
+            raise ValueError(f"Unknown curriculum phase: {self.phase}")
+        scenario = replace(skill_scenario(task, seed), horizon=PHASE_HORIZONS[self.phase])
         cfg = ObservationConfig()
         super().__init__(
             PublicMemoryWrapper(
@@ -180,6 +187,7 @@ class SkillEnv(gym.Wrapper):
             )
         )
         self.first_visit = first_visit
+        self.step_cost = step_cost
         self.finished = False
 
     def reset(self, *, seed=None, options=None):
@@ -211,24 +219,55 @@ class SkillEnv(gym.Wrapper):
         core = self.unwrapped
         snap = core.evaluator_snapshot()
         all_pois = len(snap.activated_pois) == len(core.scenario.pois)
-        success = all_pois and not e["died"]
-        early = success and self.task != "P4b"
+        alive = not e["died"]
+        completed_pois = bool(snap.activated_pois) if self.phase == "P4b" else all_pois
+        early_phase = self.phase in EARLY_SUCCESS_PHASES
+        success = (
+            completed_pois and alive and (early_phase or snap.step_count == core.scenario.horizon)
+        )
+        early = success and early_phase
         self.finished = bool(terminated or truncated or early)
         info = {
             **info,
             "skill": {
-                "task": self.task,
+                "task": self.phase,
+                "phase": self.phase,
+                "source_task": self.task,
                 "success": success,
                 "intrinsic_reward": bonus,
                 "task_reward": reward,
+                "reward_components": {
+                    "area": core.reward_config.area * e["new_floor"],
+                    "discovery": core.reward_config.discovery * e["new_poi"],
+                    "activation": core.reward_config.activation * e["activated"],
+                    "death": -core.reward_config.death * e["died"],
+                    "intrinsic": bonus,
+                    "step_cost": -self.step_cost,
+                },
                 "early_success": early,
             },
         }
-        return obs, reward + bonus, bool(terminated or early), truncated, info
+        return obs, reward + bonus - self.step_cost, bool(terminated or early), truncated, info
 
 
-def make_skill_env(task, seed, reward=None, first_visit=False):
-    return SkillEnv(task, seed, reward, first_visit)
+def make_skill_env(task, seed, reward=None, first_visit=False, step_cost=0.0, *, phase=None):
+    return SkillEnv(task, seed, reward, first_visit, step_cost, phase=phase)
+
+
+def configured_skill_env(task, seed, skills, *, phase=None):
+    """Sample geometry by task; apply the active phase objective in every caller.
+
+    Phase is environment configuration only, never a policy observation.
+    """
+    phase = phase or task
+    reward = RewardConfig(activation=skills.activation, death=skills.death)
+    if phase in ("P1a", "P1b"):
+        p1 = skills.p1_reward
+        reward = RewardConfig(
+            area=p1.area, discovery=p1.discovery, activation=p1.activation, death=skills.death
+        )
+        return make_skill_env(task, seed, reward, False, p1.step_cost, phase=phase)
+    return make_skill_env(task, seed, reward, skills.first_visit, phase=phase)
 
 
 @lru_cache(maxsize=64)

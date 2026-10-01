@@ -28,7 +28,7 @@ class SkillStop(Exception):
 
 
 def preflight(config):
-    from ather_exploration.worlds.skill_tasks import TASKS, make_skill_env
+    from ather_exploration.worlds.skill_tasks import TASKS, configured_skill_env
 
     ids = skill_identity(config)
     if config.skills.stop_after == "P5":
@@ -36,7 +36,7 @@ def preflight(config):
 
         ids.update(WorldBank(config.banks).identities)
     for task in TASKS:
-        env = make_skill_env(task, 0)
+        env = configured_skill_env(task, 0, config.skills)
         try:
             obs, _ = env.reset()
             assert env.observation_space.contains(obs)
@@ -124,6 +124,13 @@ class SkillCallback(BaseCallback):
             torch.set_rng_state(ts)
             if cuda:
                 torch.cuda.set_rng_state_all(cuda)
+        for check in result.get("checks", []):
+            print(
+                f"[gate:{task}] {check['name']}={check['value']:.4f} "
+                f"{check['operator']} {check['threshold']:.4f}: "
+                f"{'PASS' if check['passed'] else 'FAIL'}",
+                flush=True,
+            )
         self.controller.eval_steps += result["eval_steps"]
         append_jsonl(
             self.root / "skill_evaluations.jsonl",
@@ -158,24 +165,28 @@ class SkillCallback(BaseCallback):
             if subset:
                 for key in ("return", "length", "intrinsic_return"):
                     metrics[f"skill_train/{task}/{key}"] = float(np.mean([r[key] for r in subset]))
+                for component in (
+                    "area",
+                    "discovery",
+                    "activation",
+                    "death",
+                    "intrinsic",
+                    "step_cost",
+                ):
+                    values = [
+                        r["reward_components"][component]
+                        for r in subset
+                        if component in r.get("reward_components", {})
+                    ]
+                    if values:
+                        metrics[f"skill_train/{task}/reward_{component}"] = float(np.mean(values))
         changed = False
         if steps % self.config.skills.eval_interval == 0:
             if self.controller.index < 7:
                 result = self.evaluate(self.controller.task)
                 passed = result["passed"]
-                retention = {
-                    "P2a": ("P1b", 0.90),
-                    "P2b": ("P1b", 0.90),
-                    "P3": ("P2b", 0.80),
-                    "P4a": ("P3", 0.70),
-                    "P4b": ("P3", 0.70),
-                }.get(self.controller.task)
-                if self.controller.task in ("P2a", "P2b"):
-                    other = self.evaluate("P2b" if self.controller.task == "P2a" else "P2a")
-                    passed &= other["summary"]["deterministic"]["success"] >= 0.80
-                if retention:
-                    prior = self.evaluate(retention[0])
-                    passed &= prior["summary"]["deterministic"]["success"] >= retention[1]
+                # Advancement depends only on the current objective's validation.
+                # Earlier geometry is training data, not a separate retention exam.
                 for mode, values in result["summary"].items():
                     for k, v in values.items():
                         metrics[f"skills/{self.controller.task}/{mode}/{k}"] = v
@@ -298,6 +309,7 @@ def run_skill_training(
             "source_revision": implementation_id(),
             "bank_ids": identities,
             "scope": "skill_curriculum_pilot",
+            "curriculum_protocol": "active-phase-v1",
             "resume": str(resume) if resume else None,
         },
     )

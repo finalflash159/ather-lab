@@ -23,6 +23,12 @@ skills:
   death: 2.0
   first_visit: false
   wall_mask: false
+  # Active P1a/P1b only. Later phases reuse easy maps with their own rules.
+  p1_reward:
+    area: 0.0
+    discovery: 0.0
+    activation: 0.5
+    step_cost: 0.01
 banks:
   small: ../../../artifacts/banks-skills/small
   medium: ../../../artifacts/banks-skills/medium

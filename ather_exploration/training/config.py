@@ -26,6 +26,13 @@ class TrackingConfig(FrozenConfig):
     entity: str | None = None
 
 
+class P1RewardConfig(FrozenConfig):
+    area: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    discovery: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    activation: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    step_cost: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+
+
 class SkillConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     enabled: bool = False
@@ -37,6 +44,7 @@ class SkillConfig(BaseModel):
     death: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     first_visit: bool = False
     wall_mask: bool = False
+    p1_reward: P1RewardConfig = Field(default_factory=P1RewardConfig)
 
 
 class TrainingConfig(FrozenConfig):

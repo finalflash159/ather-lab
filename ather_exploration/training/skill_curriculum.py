@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 
 STAGES = ("P1a", "P1b", "P2a", "P2b", "P3", "P4a", "P4b", "P5a", "P5b")
-CAPS = (131072, 131072, 262144, 262144, 524288, 1048576, 1048576)
+CAPS = (250000, 250000, 262144, 262144, 524288, 1048576, 1048576)
 MINIMUM = (32768, 32768, 32768, 32768, 65536, 65536, 65536)
 
 
@@ -44,6 +44,7 @@ class SkillController:
         return False
 
     def mixture(self):
+        """Geometry sources only; all episodes use the active phase rules."""
         return {
             "P1a": [("P1a", 1.0)],
             "P1b": [("P1b", 0.75), ("P1a", 0.25)],

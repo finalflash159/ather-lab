@@ -81,6 +81,7 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
             },
             "skill_controller": runner_state.get("skill_controller"),
             "viewer_task": runner_state.get("viewer_task"),
+            "curriculum_protocol": "active-phase-v1" if config.skills.enabled else None,
             "boundary": "completed_update" if model._n_updates else "initialization_only",
             "optimizer_updates": model._n_updates,
             "resume": "optimizer/counters/RNG/sampler; reset episodes/LSTM",

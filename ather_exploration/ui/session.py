@@ -73,17 +73,12 @@ class EpisodeSession:
             )
             viewer_task = metadata.get("viewer_task") if skill_state else None
             if skill_state and (viewer_task or "").startswith(("P1", "P2", "P3", "P4")):
-                from ather_exploration.config import RewardConfig
-                from ather_exploration.worlds.skill_tasks import make_skill_env
+                from ather_exploration.training.config import SkillConfig
+                from ather_exploration.worlds.skill_tasks import configured_skill_env
 
-                skill_config = metadata["config"]["skills"]
-                self.env = make_skill_env(
-                    viewer_task,
-                    spec.seed,
-                    RewardConfig(
-                        activation=skill_config["activation"], death=skill_config["death"]
-                    ),
-                    skill_config["first_visit"],
+                skill_config = SkillConfig.model_validate(metadata["config"]["skills"])
+                self.env = configured_skill_env(
+                    viewer_task, spec.seed, skill_config, phase=viewer_task
                 )
             else:
                 self.env = make_env(config)
@@ -126,6 +121,7 @@ class EpisodeSession:
             "spec": self.spec,
             "checkpoint": getattr(self.agent, "metadata", {}).get("checkpoint"),
             "phase": getattr(self.agent, "metadata", {}).get("viewer_task"),
+            "source_task": getattr(self.env, "task", None),
             "history": [(r["t"], r["coverage"], r["activation"] or 0) for r in self.metrics.steps],
         }
 
@@ -153,8 +149,15 @@ class EpisodeSession:
         self.obs, reward, terminated, truncated, info = self.env.step(action)
         core = self.env.unwrapped
         row = self.metrics.update(
-            core.evaluator_snapshot(), self.obs, reward, info["transition"], core.collision_stage
+            core.evaluator_snapshot(),
+            self.obs,
+            info.get("skill", {}).get("task_reward", reward),
+            info["transition"],
+            core.collision_stage,
         )
+        if "skill" in info:
+            row["skill_reward_components"] = info["skill"]["reward_components"]
+            row["learning_reward"] = reward
         row["terminated"], row["truncated"] = bool(terminated), bool(truncated)
         self.total_reward += reward
         self.done = (
@@ -164,6 +167,9 @@ class EpisodeSession:
         )
         if self.done:
             self.result = self.metrics.finish(cancelled=truncated or not terminated)
+            if "skill" in info:
+                self.result["skill_success"] = info["skill"]["success"]
+                self.result["learning_return"] = self.total_reward
         return self.frame()
 
     def export(self, path):

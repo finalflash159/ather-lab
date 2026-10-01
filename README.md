@@ -2,14 +2,14 @@
 
 Partially observed exploration with persistent POIs and patrolling threats, built on MiniGrid 3.1.0. The project includes procedural maps, public spatial memory, random/frontier baselines, PPO/RecurrentPPO, checkpoint evaluation, a local inference viewer, and headless Modal training with W&B metrics.
 
-The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates; hitting a skill budget without passing stops the run. This implementation has not yet been trained or validated for learning quality.
+The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates for the active phase only; easier maps inherit that phase’s reward, horizon and termination rules. P3 continues after POI activation until its horizon. No task-ID input or old-task retention exams are used; hitting a skill budget without passing stops the run. This implementation has not yet been trained or validated for learning quality.
 
 ## Setup and checks
 
 Use Python 3.11 and the locked CPU dependencies locally:
 
 ```bash
-uv sync --locked --extra cpu
+uv sync --locked --extra cpu --extra modal
 .venv/bin/python -m pytest tests -q
 .venv/bin/python -m ather_exploration train-check --config ather_exploration/resources/training/skills_p1.yaml
 ```
