@@ -1,0 +1,551 @@
+{
+  "schema_version": "1",
+  "cases": [
+    {
+      "name": "wall_wait",
+      "purpose": "Blocked movement and WAIT both consume one tick; visits stay unchanged.",
+      "scenario": {
+        "terrain": [
+          "#####",
+          "#...#",
+          "#####"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [],
+        "routes": [],
+        "phases": [],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        0,
+        4
+      ],
+      "expected": {
+        "steps": [
+          {
+            "tick": 1,
+            "position": [
+              1,
+              1
+            ],
+            "motion": "wall_blocked",
+            "delta": [
+              0,
+              0
+            ]
+          },
+          {
+            "tick": 2,
+            "position": [
+              1,
+              1
+            ],
+            "motion": "waited",
+            "delta": [
+              0,
+              0
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "collision1_poi",
+      "purpose": "Moving into a monster on POI dies before activation and monster phase.",
+      "scenario": {
+        "terrain": [
+          "######",
+          "#....#",
+          "######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [
+          [
+            2,
+            1
+          ]
+        ],
+        "routes": [
+          [
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 1,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        2
+      ],
+      "expected": {
+        "tick": 1,
+        "position": [
+          2,
+          1
+        ],
+        "monster_positions": [
+          [
+            2,
+            1
+          ]
+        ],
+        "collision_stage": 1,
+        "activated": false,
+        "end_reason": "death",
+        "terminated": true,
+        "truncated": false
+      }
+    },
+    {
+      "name": "collision2_poi",
+      "purpose": "POI activation survives as an event even if monster arrives this tick.",
+      "scenario": {
+        "terrain": [
+          "######",
+          "#....#",
+          "######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [
+          [
+            2,
+            1
+          ]
+        ],
+        "routes": [
+          [
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              1
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 1,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        2
+      ],
+      "expected": {
+        "tick": 1,
+        "position": [
+          2,
+          1
+        ],
+        "monster_positions": [
+          [
+            2,
+            1
+          ]
+        ],
+        "collision_stage": 2,
+        "activated": true,
+        "end_reason": "death",
+        "terminated": true,
+        "truncated": false
+      }
+    },
+    {
+      "name": "edge_swap",
+      "purpose": "Swap attempt dies at collision1, before monster can move away.",
+      "scenario": {
+        "terrain": [
+          "######",
+          "#....#",
+          "######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [],
+        "routes": [
+          [
+            [
+              2,
+              1
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 1,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        2
+      ],
+      "expected": {
+        "collision_stage": 1,
+        "monster_positions": [
+          [
+            2,
+            1
+          ]
+        ],
+        "end_reason": "death"
+      }
+    },
+    {
+      "name": "horizon_alive",
+      "purpose": "H is finite task termination and is not TimeLimit truncation.",
+      "scenario": {
+        "terrain": [
+          "#####",
+          "#...#",
+          "#####"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [],
+        "routes": [],
+        "phases": [],
+        "horizon": 1,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        4
+      ],
+      "expected": {
+        "tick": 1,
+        "end_reason": "budget",
+        "terminated": true,
+        "truncated": false
+      }
+    },
+    {
+      "name": "death_at_horizon",
+      "purpose": "Death wins over alive-budget outcome on final tick.",
+      "scenario": {
+        "terrain": [
+          "######",
+          "#....#",
+          "######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [],
+        "routes": [
+          [
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 1,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        2
+      ],
+      "expected": {
+        "tick": 1,
+        "end_reason": "death",
+        "terminated": true,
+        "truncated": false
+      }
+    },
+    {
+      "name": "corner_occlusion",
+      "purpose": "A # / . P: the closed wall corner hides P until stepping south.",
+      "scenario": {
+        "terrain": [
+          "#####",
+          "#.#.#",
+          "#...#",
+          "#####"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [
+          [
+            2,
+            2
+          ]
+        ],
+        "routes": [],
+        "phases": [],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        1
+      ],
+      "expected": {
+        "poi_visible_at_reset": false,
+        "poi_visible_after_action": true,
+        "activated": false
+      }
+    },
+    {
+      "name": "entities_transparent",
+      "purpose": "Monster and POI do not block LOS; this is NOT a valid main reset.",
+      "scenario": {
+        "terrain": [
+          "#######",
+          "#.....#",
+          "#.....#",
+          "#######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [
+          [
+            4,
+            1
+          ]
+        ],
+        "routes": [
+          [
+            [
+              2,
+              1
+            ],
+            [
+              2,
+              2
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [],
+      "expected": {
+        "poi_visible_at_reset": true,
+        "main_reset_allowed": false
+      }
+    },
+    {
+      "name": "poi_revisit",
+      "purpose": "First entry activates; return gives no second activation reward.",
+      "scenario": {
+        "terrain": [
+          "######",
+          "#....#",
+          "######"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [
+          [
+            2,
+            1
+          ]
+        ],
+        "routes": [],
+        "phases": [],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [
+        2,
+        3,
+        2
+      ],
+      "expected": {
+        "activation_per_step": [
+          true,
+          false,
+          false
+        ],
+        "active_poi_count": 1,
+        "done": false
+      }
+    },
+    {
+      "name": "stale_memory",
+      "purpose": "Leaving FOV preserves last-seen monster bit; seeing empty clears it.",
+      "scenario": {
+        "terrain": [
+          "########",
+          "#......#",
+          "#......#",
+          "########"
+        ],
+        "spawn": [
+          2,
+          1
+        ],
+        "pois": [],
+        "routes": [
+          [
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              5,
+              1
+            ]
+          ]
+        ],
+        "phases": [
+          0
+        ],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 1,
+        "fixture_only": true
+      },
+      "radius": 1,
+      "actions": [
+        3,
+        4,
+        2
+      ],
+      "expected": {
+        "cell": [
+          3,
+          1
+        ],
+        "observations": [
+          {
+            "tick": 0,
+            "visible": true,
+            "last_monster": true,
+            "age": 0
+          },
+          {
+            "tick": 1,
+            "visible": false,
+            "last_monster": true,
+            "age": 1
+          },
+          {
+            "tick": 2,
+            "visible": false,
+            "last_monster": true,
+            "age": 2
+          },
+          {
+            "tick": 3,
+            "visible": true,
+            "last_monster": false,
+            "age": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "branch_and_loop",
+      "purpose": "Hand-drawn cycle with a one-cell branch/dead end, for topology checks.",
+      "scenario": {
+        "terrain": [
+          "#########",
+          "#.....###",
+          "#.###.###",
+          "#.###...#",
+          "#.....###",
+          "#########"
+        ],
+        "spawn": [
+          1,
+          1
+        ],
+        "pois": [],
+        "routes": [],
+        "phases": [],
+        "horizon": 8,
+        "seed": 0,
+        "patrol_period": 2,
+        "fixture_only": true
+      },
+      "radius": 4,
+      "actions": [],
+      "expected": {
+        "connected_components": 1,
+        "dead_ends": [
+          [
+            7,
+            3
+          ]
+        ],
+        "cycle_exists": true
+      }
+    }
+  ]
+}

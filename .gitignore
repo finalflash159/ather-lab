@@ -1,27 +1,27 @@
-*.pyc
-*__pycache__
-*egg-info
-trained_models
+# Python environment and generated metadata
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.egg-info/
 
-# PyPI
-build/*
-dist/*
+# Tests, lint and build output
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+build/
+dist/
+
+# Experiment output
+artifacts/
+
+# Local files
+.env
+.DS_Store
 .idea/
 
-# Docs
-.DS_Store
-_site
-.jekyll-cache
-__pycache__
-.vscode/
-docs/_build/
-docs/build/
-_build/
-/docs/environments/**/*.md
-/docs/environments/**/*.html
-!/docs/environments/**/index.md
-
-# Virtual environments
-.env
-.venv
-venv
+# Private local documentation and editor state
+/notes/
+/.vscode/
+.env.*
+!.env.example

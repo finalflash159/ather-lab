@@ -1,0 +1,29 @@
+# Development example. Loading/checking this file DOES NOT start training.
+# Choices: ppo, recurrent_ppo, ppo_curriculum, recurrent_ppo_curriculum.
+# recurrent_ppo uses LSTM; *_curriculum enables spawn curriculum.
+method: ppo
+seed: 0
+# Small explicit budget for your first learning check; not a formal experiment.
+total_timesteps: 256000
+n_envs: 1
+n_steps: 256
+batch_size: 64
+n_epochs: 4
+learning_rate: 0.0003
+final_learning_rate: 0.00003
+device: cpu
+vec_backend: dummy
+torch_threads: 1
+checkpoint_updates: 1
+trace_every: 4
+# Resolved relative to THIS YAML file, not your current working directory.
+banks:
+  small: ../../../artifacts/banks-progress/small
+  medium: ../../../artifacts/banks-progress/medium
+  large: ../../../artifacts/banks-progress/large
+
+# Metrics go to W&B; Modal injects WANDB_API_KEY from Secret "wandb".
+tracking:
+  mode: online
+  project: ather-exploration
+  entity: null

@@ -1,0 +1,17 @@
+# Pilot defaults; validation in ather_exploration/config.py
+preset: large
+width: 41
+height: 41
+num_rooms: 10
+room_side_min: 5
+room_side_max: 11
+num_pois: 4
+num_monsters: 3
+route_length_min: 10
+route_length_max: 16
+horizon: 1024
+patrol_period: 2
+extra_connections_min: 2
+extra_connections_max: 3
+budgets:
+  validator_expansions: 16000000

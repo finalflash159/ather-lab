@@ -296,11 +296,11 @@ class RGBImgObsWrapper(ObservationWrapper):
         >>> env = gym.make("MiniGrid-Empty-5x5-v0")
         >>> obs, _ = env.reset()
         >>> plt.imshow(obs['image'])  # doctest: +SKIP
-        ![NoWrapper](../figures/lavacrossing_NoWrapper.png)
+        ![NoWrapper](https://raw.githubusercontent.com/Farama-Foundation/Minigrid/90928729376741a41222a257911343b97103b548/figures/lavacrossing_NoWrapper.png)
         >>> env = RGBImgObsWrapper(env)
         >>> obs, _ = env.reset()
         >>> plt.imshow(obs['image'])  # doctest: +SKIP
-        ![RGBImgObsWrapper](../figures/lavacrossing_RGBImgObsWrapper.png)
+        ![RGBImgObsWrapper](https://raw.githubusercontent.com/Farama-Foundation/Minigrid/90928729376741a41222a257911343b97103b548/figures/lavacrossing_RGBImgObsWrapper.png)
     """
 
     def __init__(self, env, tile_size=8):
@@ -343,15 +343,15 @@ class RGBImgPartialObsWrapper(ObservationWrapper):
         >>> env = gym.make("MiniGrid-LavaCrossingS11N5-v0")
         >>> obs, _ = env.reset()
         >>> plt.imshow(obs["image"])  # doctest: +SKIP
-        ![NoWrapper](../figures/lavacrossing_NoWrapper.png)
+        ![NoWrapper](https://raw.githubusercontent.com/Farama-Foundation/Minigrid/90928729376741a41222a257911343b97103b548/figures/lavacrossing_NoWrapper.png)
         >>> env_obs = RGBImgObsWrapper(env)
         >>> obs, _ = env_obs.reset()
         >>> plt.imshow(obs["image"])  # doctest: +SKIP
-        ![RGBImgObsWrapper](../figures/lavacrossing_RGBImgObsWrapper.png)
+        ![RGBImgObsWrapper](https://raw.githubusercontent.com/Farama-Foundation/Minigrid/90928729376741a41222a257911343b97103b548/figures/lavacrossing_RGBImgObsWrapper.png)
         >>> env_obs = RGBImgPartialObsWrapper(env)
         >>> obs, _ = env_obs.reset()
         >>> plt.imshow(obs["image"])  # doctest: +SKIP
-        ![RGBImgPartialObsWrapper](../figures/lavacrossing_RGBImgPartialObsWrapper.png)
+        ![RGBImgPartialObsWrapper](https://raw.githubusercontent.com/Farama-Foundation/Minigrid/90928729376741a41222a257911343b97103b548/figures/lavacrossing_RGBImgPartialObsWrapper.png)
     """
 
     def __init__(self, env, tile_size=8):

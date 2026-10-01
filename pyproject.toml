@@ -1,87 +1,78 @@
-# Package ######################################################################
-
 [build-system]
-requires = ["setuptools >= 61.0.0"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "minigrid"
-description = "Minimalistic gridworld reinforcement learning environments."
+name = "ather-exploration"
+version = "0.1.0"
+description = "Partial-observation exploration built on official MiniGrid"
 readme = "README.md"
-requires-python = ">= 3.10"
-authors = [{ name = "Farama Foundation", email = "contact@farama.org" }]
-license = { text = "MIT License" }
-keywords = ["Memory, Environment, Agent, RL, Gymnasium"]
-classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    'Intended Audience :: Science/Research',
-    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+requires-python = ">=3.11,<3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "numpy>=1.26,<3", "gymnasium==1.3.0", "pygame-ce>=2.4,<3",
+  "pydantic>=2.10,<3", "PyYAML>=6,<7",
 ]
-dependencies = ["numpy>=1.18.0", "gymnasium>=0.28.1", "pygame-ce>=2.4.0"]
-dynamic = ["version"]
 
 [project.optional-dependencies]
-testing = ["pytest>=7.0.1", "pytest-mock>=3.10.0", "matplotlib>=3.0"]
+cpu = [
+    "torch==2.11.0",
+    "stable-baselines3==2.9.0",
+    "sb3-contrib==2.9.0",
+    "tensorboard>=2.19,<3",
+    "pygame_gui>=0.6,<0.7",
+    "wandb>=0.19,<1",
+]
+cuda = [
+    "torch==2.11.0",
+    "stable-baselines3==2.9.0",
+    "sb3-contrib==2.9.0",
+    "tensorboard>=2.19,<3",
+    "modal>=1,<2",
+    "wandb>=0.19,<1",
+]
+ui = ["pygame_gui>=0.6,<0.7"]
 wfc = ["networkx", "imageio>=2.31.1"]
+modal = [
+    "modal>=1,<2",
+]
 
-[project.urls]
-Homepage = "https://farama.org"
-Repository = "https://minigrid.farama.org/"
-Documentation = "https://minigrid.farama.org/"
-"Bug Report" = "https://github.com/Farama-Foundation/Minigrid/issues"
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-mock>=3.10", "hypothesis>=6,<7", "ruff>=0.12", "build>=1,<2", "pyinstaller>=6,<7", "matplotlib>=3.9,<4"]
 
-[tool.setuptools]
-include-package-data = true
+[project.scripts]
+ather-exploration = "ather_exploration.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["minigrid*"]
+include = ["minigrid*", "ather_exploration*"]
 
-# Linters and Test tools #######################################################
-
-[tool.black]
-
-[tool.isort]
-atomic = true
-profile = "black"
-append_only = true
-src_paths = ["minigrid", "tests"]
-add_imports = ["from __future__ import annotations"]
-
-[tool.pyright]
-include = ["minigrid/**"]
-
-exclude = ["**/node_modules", "**/__pycache__"]
-
-strict = []
-
-typeCheckingMode = "basic"
-pythonVersion = "3.10"
-typeshedPath = "typeshed"
-enableTypeIgnoreComments = true
-
-# This is required as the CI pre-commit does not download the module (i.e. numpy)
-#   Therefore, we have to ignore missing imports
-reportMissingImports = "none"
-
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"
-reportUnknownArgumentType = "none"
-reportPrivateUsage = "warning"
-reportUntypedFunctionDecorator = "none"
-reportMissingTypeStubs = false
-reportUnboundVariable = "warning"
-reportGeneralTypeIssues = "none"
-reportPrivateImportUsage = "none"
+[tool.setuptools.package-data]
+ather_exploration = ["resources/presets/*.yaml", "resources/fixtures/*.json", "resources/training/*.yaml"]
 
 [tool.pytest.ini_options]
-filterwarnings = [
-    'ignore:.*step API.*:DeprecationWarning',
-] # TODO: to be removed when old step API is removed
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+include = ["ather_exploration/**/*.py", "tests/**/*.py"]
+line-length = 100
+
+[tool.uv]
+conflicts = [[{extra = "cpu"}, {extra = "cuda"}]]
+
+[tool.uv.sources]
+torch = [
+  {index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'"},
+  {index = "pytorch-cu128", extra = "cuda", marker = "sys_platform == 'linux'"},
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
