@@ -14,6 +14,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ather Exploration — G0/G1/G2/G3")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
+    skills_parser = commands.add_parser(
+        "build-skills", help="Validate and record skill seed pools; no training"
+    )
+    skills_parser.add_argument("--config", type=Path, required=True)
+    skills_parser.add_argument("--output", type=Path, required=True)
     config_parser = commands.add_parser("config", help="Validate and print resolved env config")
     source = config_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--preset", choices=PRESET_NAMES)
@@ -97,6 +102,7 @@ def main() -> None:
     train_parser.add_argument("--config", type=Path, required=True)
     train_parser.add_argument("--output", type=Path, required=True)
     train_parser.add_argument("--resume", type=Path)
+    train_parser.add_argument("--continue-curriculum", action="store_true")
     preflight = commands.add_parser(
         "train-check", help="Validate training config/banks; NO learning"
     )
@@ -118,24 +124,44 @@ def main() -> None:
     policy_eval.add_argument("--stochastic", action="store_true")
     args = parser.parse_args()
     try:
-        if args.command in ("train", "train-check"):
+        if args.command == "build-skills":
+            from ather_exploration.training.config import read_training_config
+            from ather_exploration.worlds.skill_tasks import build_skill_suite
+
+            manifest = build_skill_suite(read_training_config(args.config), args.output)
+            result = {
+                "state": manifest["state"],
+                "output": str(args.output),
+                "tasks": list(manifest["tasks"]),
+            }
+        elif args.command in ("train", "train-check"):
             from ather_exploration.training.config import read_training_config
 
             config = read_training_config(args.config)
             if args.command == "train-check":
                 from ather_exploration.training.curriculum import WorldBank
+                from ather_exploration.training.skill_runner import preflight
 
-                bank = WorldBank(config.banks)
+                identities = (
+                    preflight(config)
+                    if config.skills.enabled
+                    else WorldBank(config.banks).identities
+                )
                 result = {
                     "status": "valid",
                     "learning_executed": False,
                     "config": config.model_dump(mode="json"),
-                    "bank_ids": bank.identities,
+                    "bank_ids": identities,
                 }
             else:
                 from ather_exploration.training.runner import run_training
 
-                result = run_training(config, args.output, resume=args.resume)
+                result = run_training(
+                    config,
+                    args.output,
+                    resume=args.resume,
+                    continue_curriculum=args.continue_curriculum,
+                )
         elif args.command == "evaluate-policy":
             from ather_exploration.evaluation.learned import evaluate_checkpoint
 

@@ -183,7 +183,22 @@ class TelemetryCallback(BaseCallback):
         self.boundary()
 
 
-def run_training(config, output, *, resume=None, on_boundary=None, run_metadata=None):
+def run_training(
+    config, output, *, resume=None, on_boundary=None, run_metadata=None, continue_curriculum=False
+):
+    if config.skills.enabled:
+        from ather_exploration.training.skill_runner import run_skill_training
+
+        return run_skill_training(
+            config,
+            output,
+            resume=resume,
+            on_boundary=on_boundary,
+            run_metadata=run_metadata,
+            continue_curriculum=continue_curriculum,
+        )
+    if continue_curriculum:
+        raise ValueError("Continuation is only for skills")
     root = Path(output).resolve()
     if root.exists():
         raise FileExistsError(

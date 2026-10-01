@@ -73,6 +73,7 @@ class Scenario:
     seed: int
     patrol_period: int = 2
     fixture_only: bool = False
+    skill_task: str | None = None
     config_hash: str = ""
     source_revision: str = ""
     schema_version: str = "1"
@@ -107,6 +108,18 @@ class Scenario:
             row[0] != "#" or row[-1] != "#" for row in self.terrain
         ):
             raise ValueError("outer boundary must be walls")
+        if self.skill_task is not None and self.skill_task not in (
+            "P1a",
+            "P1b",
+            "P2a",
+            "P2b",
+            "P3",
+            "P4a",
+            "P4b",
+        ):
+            raise ValueError("Unknown skill task")
+        if self.skill_task is not None and self.fixture_only:
+            raise ValueError("Skill scenarios are not test fixtures")
         self._require_floor(self.spawn)
         for poi in self.pois:
             self._require_floor(poi)
@@ -138,7 +151,7 @@ class Scenario:
                     raise ValueError("room_labels must be immutable integer rows")
         for edge in self.topology_edges:
             _position(edge)
-        if not self.fixture_only and (not self.pois or not self.routes):
+        if not self.fixture_only and self.skill_task is None and (not self.pois or not self.routes):
             raise ValueError("main-task scenario requires POIs and monsters")
 
     def _require_floor(self, pos: Position):

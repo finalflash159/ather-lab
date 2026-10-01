@@ -29,22 +29,28 @@ def volume_handle():
 
 def upload_banks(config, volume):
     from ather_exploration.training.curriculum import WorldBank
+    from ather_exploration.training.skill_runner import preflight
     from ather_exploration.worlds.scenarios import implementation_id
 
-    banks = WorldBank(config.banks)  # Validate before any remote mutation.
+    identities = preflight(config) if config.skills.enabled else WorldBank(config.banks).identities
+    paths = {} if config.skills.enabled and config.skills.stop_after != "P5" else config.banks
     dataset = f"bank-{uuid.uuid4().hex}"
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
-        for group, path in config.banks.items():
+        for group, path in paths.items():
             source = Path(path)
             if any(p.is_symlink() for p in source.rglob("*")):
                 raise ValueError("Bank upload does not accept symlinks")
             shutil.copytree(source, root / group)
+        if config.skills.enabled:
+            from ather_exploration.worlds.skill_tasks import build_skill_suite
+
+            build_skill_suite(config, root / "skills")
         write_record(
             root / "dataset.json",
             {
                 "dataset": dataset,
-                "bank_ids": banks.identities,
+                "bank_ids": identities,
                 "source_revision": implementation_id(),
             },
         )
@@ -125,9 +131,12 @@ def download_run(volume, run_id, output):
             "run_status.json",
             "remote.json",
             "tracking.json",
+            "best.json",
             "progress.jsonl",
             "train_episodes.jsonl",
             "resume_events.jsonl",
+            "skill_evaluations.jsonl",
+            "phase_transitions.jsonl",
         ):
             if f"runs/{run_id}/{name}" not in available:
                 continue

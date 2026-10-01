@@ -79,6 +79,8 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
                 n: importlib.metadata.version(n)
                 for n in ("torch", "stable-baselines3", "sb3-contrib", "gymnasium", "numpy")
             },
+            "skill_controller": runner_state.get("skill_controller"),
+            "viewer_task": runner_state.get("viewer_task"),
             "boundary": "completed_update" if model._n_updates else "initialization_only",
             "optimizer_updates": model._n_updates,
             "resume": "optimizer/counters/RNG/sampler; reset episodes/LSTM",
@@ -113,7 +115,14 @@ def load_agent(path, observation_space, *, device="cpu"):
     path, meta = inspect_checkpoint(path)
     if schema_signature(observation_space) != meta["schema"]:
         raise ValueError("Checkpoint observation/action schema incompatible with environment")
-    model = algorithm(meta["method"]).load(path / "model.zip", device=device)
+    from sb3_contrib import MaskablePPO
+
+    cls = (
+        MaskablePPO
+        if meta["config"].get("skills", {}).get("wall_mask")
+        else algorithm(meta["method"])
+    )
+    model = cls.load(path / "model.zip", device=device)
     if schema_signature(model.observation_space) != meta["schema"]:
         raise ValueError("Serialized policy schema differs from metadata")
     return LearnedAgent(model, {**meta, "checkpoint": str(path)})

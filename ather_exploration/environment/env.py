@@ -43,7 +43,12 @@ class ExplorationEnv(MiniGridEnv):
                 raise ValueError("Provide generated record alone")
             check_generated(generated)
             scenario, env_config = generated.scenario, generated.config
-        if scenario is not None and not scenario.fixture_only and generated is None:
+        if (
+            scenario is not None
+            and not scenario.fixture_only
+            and scenario.skill_task is None
+            and generated is None
+        ):
             raise ValueError("Main-task scenario requires a validated generated record")
         if scenario is None and env_config is None:
             raise ValueError("Provide a fixture, generated record, or env_config")

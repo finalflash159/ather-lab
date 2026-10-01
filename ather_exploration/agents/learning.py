@@ -2,7 +2,7 @@
 
 import numpy as np
 import torch
-from sb3_contrib import RecurrentPPO
+from sb3_contrib import MaskablePPO, RecurrentPPO
 from stable_baselines3 import PPO
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from torch import nn
@@ -97,18 +97,23 @@ def build_model(config, env):
         )
     # SB3 supplies progress against the full budget, including restored num_timesteps.
     schedule = LinearSchedule(config.learning_rate, config.final_learning_rate)
-    return algorithm(config.method)(
+    model_class = (
+        MaskablePPO
+        if config.skills.enabled and config.skills.wall_mask
+        else algorithm(config.method)
+    )
+    return model_class(
         "MultiInputLstmPolicy" if recurrent else "MultiInputPolicy",
         env,
         learning_rate=schedule,
         n_steps=config.n_steps,
         batch_size=config.batch_size,
         n_epochs=config.n_epochs,
-        gamma=0.999,
-        gae_lambda=0.95,
+        gamma=config.gamma,
+        gae_lambda=config.gae_lambda,
         clip_range=0.2,
         target_kl=0.03,
-        ent_coef=0.01,
+        ent_coef=config.ent_coef,
         vf_coef=0.5,
         max_grad_norm=0.5,
         normalize_advantage=True,
@@ -152,6 +157,12 @@ class LearnedAgent:
                     ),
                 )
                 state.recurrent = tuple(v.cpu().numpy() for v in next_state)
+            elif isinstance(self.model, MaskablePPO):
+                from ather_exploration.worlds.skill_tasks import wall_mask
+
+                distribution = self.model.policy.get_distribution(
+                    tensor, action_masks=wall_mask(observation)
+                )
             else:
                 distribution = self.model.policy.get_distribution(tensor)
             probabilities = distribution.distribution.probs.cpu().numpy()[0].astype(float)

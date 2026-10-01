@@ -44,7 +44,16 @@ def checkpoint_options(directory):
     )
     if not paths:
         raise ValueError("No READY checkpoints in checkpoint directory")
-    return {p.name: str(p) for p in paths}
+    import json
+
+    result = {}
+    for p in paths:
+        # Labels are metadata only; selection still runs checksum/source verification.
+        metadata = json.loads((p / "metadata.json").read_text())
+        phase = metadata.get("viewer_task")
+        label = f"{phase} | {p.name}" if phase else p.name
+        result[label] = str(p)
+    return result
 
 
 class Viewer:
@@ -91,7 +100,7 @@ class Viewer:
         if self.checkpoints:
             self.widgets["checkpoint"] = UIDropDownMenu(
                 list(self.checkpoints),
-                Path(spec.checkpoint).name,
+                next(k for k, v in self.checkpoints.items() if v == spec.checkpoint),
                 pygame.Rect(390, 62, 280, 36),
                 self.manager,
             )

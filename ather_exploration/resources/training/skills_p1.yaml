@@ -1,0 +1,32 @@
+# P1-only gate. Same total budget/schedule permits explicit continuation later.
+method: ppo
+seed: 0
+total_timesteps: 4063232
+n_envs: 4
+n_steps: 256
+batch_size: 256
+n_epochs: 4
+learning_rate: 0.0003
+final_learning_rate: 0.00003
+device: cpu
+vec_backend: subproc
+torch_threads: 1
+checkpoint_updates: 16
+trace_every: 0
+skills:
+  enabled: true
+  stop_after: P1
+  train_count: 256
+  validation_count: 64
+  eval_interval: 16384
+  activation: 0.5
+  death: 2.0
+  first_visit: false
+  wall_mask: false
+banks:
+  small: ../../../artifacts/banks-skills/small
+  medium: ../../../artifacts/banks-skills/medium
+  large: ../../../artifacts/banks-skills/large
+tracking:
+  mode: online
+  project: ather-exploration

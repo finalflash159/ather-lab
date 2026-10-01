@@ -13,7 +13,9 @@ from ather_exploration.training.curriculum import WorldBank
 
 
 class TrainingEnv(gym.Env):
-    def __init__(self, banks, seed, worker, trace_every=0):
+    def __init__(self, banks, seed, worker, trace_every=0, reward_config=None, first_visit=False):
+        self.reward_override = reward_config
+        self.first_visit = first_visit
         self.bank = WorldBank(banks)
         self.rng = stage_rng(seed, "training-worker", worker)
         self.worker, self.serial, self.stage = worker, 0, 2
@@ -39,14 +41,23 @@ class TrainingEnv(gym.Env):
             self.env.close()
         record, meta = self.bank.sample(self.rng, self.stage)
         self.env = make_env(generated=record)
+        if self.reward_override is not None:
+            from ather_exploration.environment.reward import RewardTracker
+
+            self.env.unwrapped.reward_config = self.reward_override
+            self.env.unwrapped._reward_tracker = RewardTracker(self.reward_override)
         obs, info = self.env.reset()
+        self.public_position = (0, 0)
+        self.visited = {self.public_position}
+        self.bonus_left = 0.10
+        self.intrinsic_total = 0.0
         self.serial += 1
         self.meta = meta
         self.record = record
         self.metrics = EpisodeMetrics(
             self.env.unwrapped.evaluator_snapshot(),
             obs,
-            record.config.reward,
+            self.env.unwrapped.reward_config,
             episode_id=f"worker{self.worker}-episode{self.serial}",
             group=meta["group"],
             metadata=meta,
@@ -60,12 +71,25 @@ class TrainingEnv(gym.Env):
         self.metrics.update(
             core.evaluator_snapshot(), obs, reward, info["transition"], core.collision_stage
         )
+        event = info["transition"]
+        self.public_position = tuple(
+            a + b for a, b in zip(self.public_position, event["actual_delta"], strict=True)
+        )
+        bonus = 0.0
+        if any(event["actual_delta"]) and self.public_position not in self.visited:
+            if self.first_visit:
+                bonus = min(0.002, self.bonus_left)
+                self.bonus_left -= bonus
+            self.visited.add(self.public_position)
+        self.intrinsic_total += bonus
+        info = {**info, "reward_components": {"task": reward, "intrinsic": bonus}}
         if terminated or truncated:
             self._finish(cancelled=truncated)
-        return obs, reward, terminated, truncated, info
+        return obs, reward + bonus, terminated, truncated, info
 
     def _finish(self, cancelled=False, reason=None):
         record = self.metrics.finish(cancelled=cancelled)
+        record["intrinsic_return"] = self.intrinsic_total
         if reason:
             record["cancellation_reason"] = reason
         trace = None

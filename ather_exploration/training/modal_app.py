@@ -62,7 +62,10 @@ def remote_config(payload, dataset):
             "banks": {group: str(root / group) for group in ("small", "medium", "large")},
         }
     )
-    if WorldBank(config.banks).identities != manifest["bank_ids"]:
+    from ather_exploration.training.skill_runner import preflight
+
+    identities = preflight(config) if config.skills.enabled else WorldBank(config.banks).identities
+    if identities != manifest["bank_ids"]:
         raise ValueError("Remote bank identities differ from upload")
     return config
 
@@ -79,7 +82,12 @@ def remote_config(payload, dataset):
     secrets=[modal.Secret.from_name("wandb", required_keys=["WANDB_API_KEY"])],
 )
 def execute(
-    payload: dict, dataset: str, command: str = "check", run_id: str = "", resume: str = ""
+    payload: dict,
+    dataset: str,
+    command: str = "check",
+    run_id: str = "",
+    resume: str = "",
+    continue_curriculum: bool = False,
 ):
     import torch
 
@@ -103,7 +111,12 @@ def execute(
     }
     if command == "check":
         torch.set_num_threads(config.torch_threads)
-        env = TrainingEnv(config.banks, config.seed, 0, 0)
+        if config.skills.enabled:
+            from ather_exploration.training.skill_environments import SkillTrainingEnv
+
+            env = SkillTrainingEnv(config, 0)
+        else:
+            env = TrainingEnv(config.banks, config.seed, 0, 0)
         try:
             model = build_model(config, env)
             observation, _ = env.reset()
@@ -144,6 +157,7 @@ def execute(
                 config,
                 local_output,
                 resume=parent,
+                continue_curriculum=continue_curriculum,
                 on_boundary=publish,
                 run_metadata=resources,
             )
@@ -246,6 +260,7 @@ def main(
     command: str = "check",
     run_id: str = "",
     resume: str = "",
+    continue_curriculum: bool = False,
 ):
     from ather_exploration.training.config import read_training_config
 
@@ -266,4 +281,4 @@ def main(
         ),
         flush=True,
     )
-    print(execute.remote(payload, dataset, command, run_id, resume))
+    print(execute.remote(payload, dataset, command, run_id, resume, continue_curriculum))

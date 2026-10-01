@@ -66,7 +66,27 @@ class EpisodeSession:
                 stored = metadata.get("environment_configs", {}).get(spec.preset)
                 if stored is not None:
                     config = EnvConfig.model_validate(stored)
-            self.env = make_env(config)
+            skill_state = (
+                metadata.get("skill_controller")
+                if spec.checkpoint and not spec.config_path
+                else None
+            )
+            viewer_task = metadata.get("viewer_task") if skill_state else None
+            if skill_state and (viewer_task or "").startswith(("P1", "P2", "P3", "P4")):
+                from ather_exploration.config import RewardConfig
+                from ather_exploration.worlds.skill_tasks import make_skill_env
+
+                skill_config = metadata["config"]["skills"]
+                self.env = make_skill_env(
+                    viewer_task,
+                    spec.seed,
+                    RewardConfig(
+                        activation=skill_config["activation"], death=skill_config["death"]
+                    ),
+                    skill_config["first_visit"],
+                )
+            else:
+                self.env = make_env(config)
         try:
             self.obs, _ = self.env.reset(seed=spec.seed)
             if spec.agent in ("ppo", "recurrent", "checkpoint"):
@@ -105,6 +125,7 @@ class EpisodeSession:
             "done": self.done,
             "spec": self.spec,
             "checkpoint": getattr(self.agent, "metadata", {}).get("checkpoint"),
+            "phase": getattr(self.agent, "metadata", {}).get("viewer_task"),
             "history": [(r["t"], r["coverage"], r["activation"] or 0) for r in self.metrics.steps],
         }
 
