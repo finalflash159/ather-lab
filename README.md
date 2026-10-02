@@ -2,7 +2,7 @@
 
 Partially observed exploration with persistent POIs and patrolling threats, built on MiniGrid 3.1.0. The project includes procedural maps, public spatial memory, random/frontier baselines, PPO/RecurrentPPO, checkpoint evaluation, a local inference viewer, and headless Modal training with W&B metrics.
 
-The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates for the active phase only; easier maps inherit that phase’s reward, horizon and termination rules. P3 continues after POI activation until its horizon. No task-ID input or old-task retention exams are used; hitting a skill budget without passing stops the run. This implementation has not yet been trained or validated for learning quality.
+The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates for the active phase only; easier maps inherit that phase’s reward, horizon and termination rules. P3 continues after POI activation until its horizon. No task-ID input or old-task retention exams are used; hitting a skill budget without passing stops the run. A single-seed P1 pilot passed both validation gates at 98,304 environment steps. P2 learning quality remains to be evaluated.
 
 ## Setup and checks
 
@@ -26,6 +26,18 @@ These checks do not train. Always use `.venv/bin/python` (including `-m modal`) 
 The second command **trains**. Configure W&B credentials or set tracking mode to offline before running. The P1 config stops after both P1 gates pass; the large total budget preserves the learning-rate schedule for later continuation. It does not train for the entire budget in P1. No target world bank is required for P1–P4.
 
 `skills.yaml` enables the full sequence and requires target banks at its configured paths. Use `build-suite --help` to create them. Continuing from a completed phase requires a new output directory, `--resume PATH_TO_STEP`, `--continue-curriculum`, and a config with a later `skills.stop_after`. Architecture and other training settings must stay compatible.
+
+## P2 continuation
+
+`skills_p2.yaml` stops after P2 and adds a 0.005 cost to every action while retaining first-observation coverage and POI rewards. It preserves PPO settings and the full learning-rate schedule. Diagnostics separate searching for a POI from reaching it after discovery; missing events are null with explicit sample counts.
+
+For the audited legacy P1 source, use `--transfer-p1-to-p2` together with `--resume` and `--continue-curriculum` on training commands. A no-learning local check is:
+
+```bash
+.venv/bin/python -m ather_exploration train-check --config ather_exploration/resources/training/skills_p2.yaml --resume artifacts/modal/skills-p1-01/checkpoints/step_98304 --transfer-p1-to-p2
+```
+
+Modal supports the same transfer flag for `--command check` and `--command train`; remote paths use `RUN_ID/checkpoints/step_N`. Check mode also requires `--continue-curriculum`. Transfer validates the parent integrity, source allowlist, completed phase, observation/action schema, network architecture, optimizer and counters. It preserves weights/optimizer/schedule and resets episodes. `transfer.json` and checkpoint metadata record provenance. Ordinary resume/inference retain strict source checks. Upload a fresh dataset after Python source changes. Tests simulate training boundaries without optimizer updates.
 
 ## Modal and inference
 
