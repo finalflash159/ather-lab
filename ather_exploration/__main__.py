@@ -103,10 +103,13 @@ def main() -> None:
     train_parser.add_argument("--output", type=Path, required=True)
     train_parser.add_argument("--resume", type=Path)
     train_parser.add_argument("--continue-curriculum", action="store_true")
+    train_parser.add_argument("--transfer-p1-to-p2", action="store_true")
     preflight = commands.add_parser(
         "train-check", help="Validate training config/banks; NO learning"
     )
     preflight.add_argument("--config", type=Path, required=True)
+    preflight.add_argument("--resume", type=Path)
+    preflight.add_argument("--transfer-p1-to-p2", action="store_true")
     replay_parser = commands.add_parser("replay", help="Verify recorded actions without a policy")
     replay_parser.add_argument("--file", type=Path, required=True)
     policy_eval = commands.add_parser(
@@ -147,7 +150,17 @@ def main() -> None:
                     if config.skills.enabled
                     else WorldBank(config.banks).identities
                 )
+                if args.resume and not args.transfer_p1_to_p2:
+                    raise ValueError("train-check --resume requires --transfer-p1-to-p2")
+                if args.transfer_p1_to_p2 and not args.resume:
+                    raise ValueError("P1 transfer check requires --resume")
+                transfer_check = {}
+                if args.transfer_p1_to_p2:
+                    from ather_exploration.training.skill_transfer import check_p1_transfer
+
+                    transfer_check = check_p1_transfer(args.resume, config)
                 result = {
+                    **transfer_check,
                     "status": "valid",
                     "learning_executed": False,
                     "config": config.model_dump(mode="json"),
@@ -161,6 +174,7 @@ def main() -> None:
                     args.output,
                     resume=args.resume,
                     continue_curriculum=args.continue_curriculum,
+                    transfer_p1_to_p2=args.transfer_p1_to_p2,
                 )
         elif args.command == "evaluate-policy":
             from ather_exploration.evaluation.learned import evaluate_checkpoint

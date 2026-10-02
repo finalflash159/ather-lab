@@ -131,6 +131,7 @@ def download_run(volume, run_id, output):
             "run_status.json",
             "remote.json",
             "tracking.json",
+            "transfer.json",
             "best.json",
             "progress.jsonl",
             "train_episodes.jsonl",

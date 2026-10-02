@@ -88,6 +88,7 @@ def execute(
     run_id: str = "",
     resume: str = "",
     continue_curriculum: bool = False,
+    transfer_p1_to_p2: bool = False,
 ):
     import torch
 
@@ -109,6 +110,25 @@ def execute(
         "source_revision": implementation_id(),
         "dataset": dataset,
     }
+    parent = None
+    if resume:
+        # Explicit checkpoint boundary only; immutable parent, new attempt/run ID.
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}/checkpoints/step_[0-9]+", resume):
+            raise ValueError("resume must be RUN_ID/checkpoints/step_N")
+        parent = MOUNT / "runs" / resume
+    if transfer_p1_to_p2 and (not resume or not continue_curriculum):
+        raise ValueError("P1 transfer requires --resume and --continue-curriculum")
+    if command == "check" and parent:
+        if not transfer_p1_to_p2:
+            raise ValueError("Remote resume check requires --transfer-p1-to-p2")
+        from ather_exploration.training.skill_transfer import check_p1_transfer
+
+        torch.set_num_threads(config.torch_threads)
+        result = check_p1_transfer(parent, config)
+        torch.cuda.synchronize()
+        return {**resources, **result, "cuda_forward_env_step": "pass"}
     if command == "check":
         torch.set_num_threads(config.torch_threads)
         if config.skills.enabled:
@@ -132,14 +152,6 @@ def execute(
         finally:
             env.close()
     output = MOUNT / "runs" / identifier(run_id)
-    parent = None
-    if resume:
-        # Explicit checkpoint boundary only; immutable parent, new attempt/run ID.
-        import re
-
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}/checkpoints/step_[0-9]+", resume):
-            raise ValueError("resume must be RUN_ID/checkpoints/step_N")
-        parent = MOUNT / "runs" / resume
     output.mkdir(parents=True, exist_ok=False)
     import tempfile
 
@@ -158,6 +170,7 @@ def execute(
                 local_output,
                 resume=parent,
                 continue_curriculum=continue_curriculum,
+                transfer_p1_to_p2=transfer_p1_to_p2,
                 on_boundary=publish,
                 run_metadata=resources,
             )
@@ -261,6 +274,7 @@ def main(
     run_id: str = "",
     resume: str = "",
     continue_curriculum: bool = False,
+    transfer_p1_to_p2: bool = False,
 ):
     from ather_exploration.training.config import read_training_config
 
@@ -281,4 +295,8 @@ def main(
         ),
         flush=True,
     )
-    print(execute.remote(payload, dataset, command, run_id, resume, continue_curriculum))
+    print(
+        execute.remote(
+            payload, dataset, command, run_id, resume, continue_curriculum, transfer_p1_to_p2
+        )
+    )

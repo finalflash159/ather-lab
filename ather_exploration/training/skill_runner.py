@@ -62,6 +62,7 @@ class SkillCallback(BaseCallback):
         self.started = time.monotonic()
         self.viewer_task = controller.task
         self.episodes = []
+        self.transfer = None
 
     def _on_step(self):
         if not np.isfinite(self.locals["rewards"]).all():
@@ -98,6 +99,7 @@ class SkillCallback(BaseCallback):
                 "env_steps": steps,
                 "environment_configs": configs,
                 "state": self.state,
+                "transfer": self.transfer,
             },
             self.identities,
         )
@@ -189,7 +191,8 @@ class SkillCallback(BaseCallback):
                 # Earlier geometry is training data, not a separate retention exam.
                 for mode, values in result["summary"].items():
                     for k, v in values.items():
-                        metrics[f"skills/{self.controller.task}/{mode}/{k}"] = v
+                        if v is not None:
+                            metrics[f"skills/{self.controller.task}/{mode}/{k}"] = v
                 previous = self.controller.task
                 changed = self.controller.observe(passed, steps)
                 if self.controller.failed:
@@ -293,13 +296,22 @@ class SkillCallback(BaseCallback):
 
 
 def run_skill_training(
-    config, output, *, resume=None, on_boundary=None, run_metadata=None, continue_curriculum=False
+    config,
+    output,
+    *,
+    resume=None,
+    on_boundary=None,
+    run_metadata=None,
+    continue_curriculum=False,
+    transfer_p1_to_p2=False,
 ):
     root = Path(output).resolve()
     if root.exists():
         raise FileExistsError("Use a new run directory")
     if continue_curriculum and resume is None:
         raise ValueError("Continuation requires --resume")
+    if transfer_p1_to_p2 and (not continue_curriculum or resume is None):
+        raise ValueError("P1 transfer requires --resume and --continue-curriculum")
     identities = preflight(config)
     root.mkdir(parents=True)
     write_record(
@@ -331,7 +343,17 @@ def run_skill_training(
             else SubprocVecEnv(factories, start_method="spawn")
         )
         controller = SkillController()
-        if resume:
+        transfer = None
+        if transfer_p1_to_p2:
+            from ather_exploration.training.skill_transfer import prepare_p1_transfer
+
+            model, state, transfer = prepare_p1_transfer(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            for i, worker in enumerate(state["workers"]):
+                env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["parent_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif resume:
             parent, meta = inspect_checkpoint(resume)
             old = meta["config"]
             new = config.model_dump(mode="json")
@@ -348,6 +370,7 @@ def run_skill_training(
             if any(identities.get(k) != v for k, v in meta["bank_ids"].items()):
                 raise ValueError("Resume bank mismatch")
             state = json.loads((parent / "runner_state.json").read_text())
+            transfer = state.get("transfer")
             if state.get("state") == "PHASE_COMPLETED" and not continue_curriculum:
                 raise ValueError(
                     "Completed phase requires --continue-curriculum and extended stop_after"
@@ -371,6 +394,7 @@ def run_skill_training(
         model.set_logger(configure(str(root / "tensorboard"), ["tensorboard", "csv"]))
         callback = SkillCallback(config, root, controller, identities, on_boundary)
         callback.tracker = tracker
+        callback.transfer = transfer
         callback.last = model.num_timesteps
         write_record(root / "run_status.json", {"state": "RUNNING"}, replace=True)
         try:

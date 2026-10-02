@@ -17,6 +17,9 @@ from ather_exploration.worlds.scenarios import implementation_id, read_record
 
 FILES = {"model.zip", "metadata.json", "runner_state.json", "rng_state.pt"}
 
+# Audited active-phase-v1 P1 implementation; no arbitrary cross-source resume.
+P1_TRANSFER_SOURCE = "3aa079a570354a8e2336bd7dfadb64bb45b202ec38fc2360f9aee73304fdbaf2"
+
 
 def _hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -33,7 +36,7 @@ def resolve_checkpoint(path):
     return path
 
 
-def inspect_checkpoint(path):
+def inspect_checkpoint(path, *, transfer_p1_to_p2=False):
     path = resolve_checkpoint(path)
     if not (path / "READY").is_file():
         raise ValueError("Checkpoint is not READY")
@@ -47,8 +50,21 @@ def inspect_checkpoint(path):
     meta = json.loads((path / "metadata.json").read_text())
     if meta.get("artifact_schema") != "g4-checkpoint-v1":
         raise ValueError("Unsupported checkpoint schema")
-    if meta.get("source_revision") != implementation_id():
+    if meta.get("source_revision") != implementation_id() and (
+        not transfer_p1_to_p2 or meta.get("source_revision") != P1_TRANSFER_SOURCE
+    ):
         raise ValueError("Checkpoint source revision differs from current code")
+    if transfer_p1_to_p2:
+        state = json.loads((path / "runner_state.json").read_text())
+        if (
+            meta.get("curriculum_protocol") != "active-phase-v1"
+            or meta.get("viewer_task") != "P1b"
+            or meta.get("config", {}).get("skills", {}).get("stop_after") != "P1"
+            or state.get("state") != "PHASE_COMPLETED"
+            or state.get("skill_controller", {}).get("index") != 2
+            or state.get("skill_controller", {}).get("failed")
+        ):
+            raise ValueError("P1 transfer requires a completed P1 checkpoint ready for P2a")
     algorithm(meta["method"])
     return path, meta
 
@@ -81,6 +97,7 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
             },
             "skill_controller": runner_state.get("skill_controller"),
             "viewer_task": runner_state.get("viewer_task"),
+            "transfer": runner_state.get("transfer"),
             "curriculum_protocol": "active-phase-v1" if config.skills.enabled else None,
             "boundary": "completed_update" if model._n_updates else "initialization_only",
             "optimizer_updates": model._n_updates,
