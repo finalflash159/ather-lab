@@ -8,6 +8,54 @@ from ather_exploration.worlds.skill_tasks import configured_skill_env, skill_poo
 from ather_exploration.worlds.topology import distances
 
 
+class SearchDiagnostics:
+    """Timing/coverage around first POI sighting, using public memory only.
+
+    The discovery action belongs to the search interval (before/through discovery).
+    Missing events remain None; conditional averages always include a sample count.
+    """
+
+    def __init__(self, observation, floors):
+        self.floors = floors
+        self.initial = float(observation["memory"][2].sum()) / floors
+        self.coverage = self.initial
+        self.first_seen = 0 if self.sees_poi(observation) else None
+        self.coverage_at_seen = self.initial if self.first_seen == 0 else None
+        self.first_activation = None
+        self.block_streak = self.longest_block_streak = 0
+
+    @staticmethod
+    def sees_poi(observation):
+        return bool(observation["memory"][3:5].any())
+
+    def update(self, step, observation, transition):
+        self.coverage = float(observation["memory"][2].sum()) / self.floors
+        if self.first_seen is None and self.sees_poi(observation):
+            self.first_seen = step
+            self.coverage_at_seen = self.coverage
+        if self.first_activation is None and transition["activated"]:
+            self.first_activation = step
+        self.block_streak = self.block_streak + 1 if observation["state"][6] else 0
+        self.longest_block_streak = max(self.longest_block_streak, self.block_streak)
+
+    def row(self):
+        seen = self.first_seen is not None
+        activated = self.first_activation is not None
+        return {
+            "poi_seen": float(seen),
+            "first_poi_seen_step": self.first_seen,
+            "first_poi_activation_step": self.first_activation,
+            "steps_seen_to_activation": (
+                self.first_activation - self.first_seen if seen and activated else None
+            ),
+            "activated_if_seen": float(activated) if seen else None,
+            "coverage_gain_before_seen": (self.coverage_at_seen if seen else self.coverage)
+            - self.initial,
+            "coverage_gain_after_seen": (self.coverage - self.coverage_at_seen if seen else None),
+            "longest_wall_block_streak": self.longest_block_streak,
+        }
+
+
 def evaluate_skill(model, task, config):
     agent = LearnedAgent(model, {})
     rows = []
@@ -34,11 +82,13 @@ def evaluate_skill(model, task, config):
                     floors = sum(row.count(".") for row in scenario.terrain)
                     initial_coverage = float(obs["memory"][2].sum()) / floors
                     coverage_history = []
+                    search = SearchDiagnostics(obs, floors)
                     for t in range(scenario.horizon):
                         action, state = agent.act(
                             obs, state, deterministic=deterministic, action_rng=rng
                         )
                         obs, _, term, trunc, info = env.step(action)
+                        search.update(t + 1, obs, info["transition"])
                         coverage_history.append(float(obs["memory"][2].sum()) / floors)
                         blocked += int(obs["state"][6])
                         moves += int(action != 4)
@@ -61,6 +111,7 @@ def evaluate_skill(model, task, config):
                     ) / scenario.horizon
                     rows.append(
                         {
+                            **search.row(),
                             "seed": seed,
                             "deterministic": deterministic,
                             "action_seed": action_seed,
@@ -113,6 +164,20 @@ def evaluate_skill(model, task, config):
                 "reward_step_cost",
             )
         }
+        mode_summary = summary["deterministic" if mode else "stochastic"]
+        for key in (
+            "poi_seen",
+            "first_poi_seen_step",
+            "first_poi_activation_step",
+            "steps_seen_to_activation",
+            "activated_if_seen",
+            "coverage_gain_before_seen",
+            "coverage_gain_after_seen",
+            "longest_wall_block_streak",
+        ):
+            values = [r[key] for r in selected if r[key] is not None]
+            mode_summary[key] = float(np.mean(values)) if values else None
+            mode_summary[f"{key}_count"] = len(values)
         if task in ("P3", "P4b"):
             summary["deterministic" if mode else "stochastic"]["survival"] = float(
                 np.mean([r["survival"] for r in selected])
@@ -179,6 +244,8 @@ def evaluate_skill(model, task, config):
     return {
         "task": task,
         "validation_scope": "current_phase_only",
+        "efficiency_reference": "full-map shortest path from spawn; POI location is oracle",
+        "discovery_metrics": "first POI; discovery action included in before_seen coverage",
         "passed": bool(passed),
         "checks": checks,
         "failed_checks": [c["name"] for c in checks if not c["passed"]],

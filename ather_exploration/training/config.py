@@ -33,6 +33,11 @@ class P1RewardConfig(FrozenConfig):
     step_cost: float = Field(default=0.005, ge=0, allow_inf_nan=False)
 
 
+class P2RewardConfig(P1RewardConfig):
+    area: float = Field(default=0.01, ge=0, allow_inf_nan=False)
+    discovery: float = Field(default=0.05, ge=0, allow_inf_nan=False)
+
+
 class SkillConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     enabled: bool = False
@@ -45,6 +50,7 @@ class SkillConfig(BaseModel):
     first_visit: bool = False
     wall_mask: bool = False
     p1_reward: P1RewardConfig = Field(default_factory=P1RewardConfig)
+    p2_reward: P2RewardConfig = Field(default_factory=P2RewardConfig)
 
 
 class TrainingConfig(FrozenConfig):

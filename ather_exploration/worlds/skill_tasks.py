@@ -267,6 +267,12 @@ def configured_skill_env(task, seed, skills, *, phase=None):
             area=p1.area, discovery=p1.discovery, activation=p1.activation, death=skills.death
         )
         return make_skill_env(task, seed, reward, False, p1.step_cost, phase=phase)
+    if phase in ("P2a", "P2b"):
+        p2 = skills.p2_reward
+        reward = RewardConfig(
+            area=p2.area, discovery=p2.discovery, activation=p2.activation, death=skills.death
+        )
+        return make_skill_env(task, seed, reward, skills.first_visit, p2.step_cost, phase=phase)
     return make_skill_env(task, seed, reward, skills.first_visit, phase=phase)
 
 

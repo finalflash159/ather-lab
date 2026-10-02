@@ -294,7 +294,7 @@ def test_p1_reward_resolver_preserves_later_tasks():
     for task in ("P1a", "P1b", "P2a", "P3", "P4b"):
         env = configured_skill_env(task, 0, SkillConfig(enabled=True))
         assert env.unwrapped.reward_config.area == (0 if task.startswith("P1") else 0.01)
-        assert env.step_cost == (0.005 if task.startswith("P1") else 0)
+        assert env.step_cost == (0.005 if task.startswith(("P1", "P2")) else 0)
         env.close()
 
 
@@ -349,7 +349,7 @@ def test_easy_map_inherits_active_phase_rules(phase, horizon, early):
     assert env.unwrapped.scenario.skill_task == "P1a"
     assert env.unwrapped.scenario.horizon == horizon
     assert env.unwrapped.reward_config.area == 0.01
-    assert env.step_cost == 0
+    assert env.step_cost == (0.005 if phase.startswith("P2") else 0)
     _, _, term, trunc, info = env.step(0)
     assert info["transition"]["activated"]
     assert term == early and not trunc

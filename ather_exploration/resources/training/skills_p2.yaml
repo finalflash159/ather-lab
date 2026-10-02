@@ -1,4 +1,4 @@
-# Full P1-P5 curriculum. Train only with explicit train command.
+# P2-only continuation from a completed P1; see notes/SKILL_CURRICULUM_GUIDE.md.
 method: ppo
 seed: 0
 total_timesteps: 4063232
@@ -15,7 +15,7 @@ checkpoint_updates: 16
 trace_every: 0
 skills:
   enabled: true
-  stop_after: P5
+  stop_after: P2
   train_count: 256
   validation_count: 64
   eval_interval: 16384
