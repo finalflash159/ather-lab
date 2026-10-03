@@ -126,6 +126,9 @@ class P3ResumeConfig(FrozenConfig):
 class RecoveryConfig(FrozenConfig):
     """Public-route supervision and stagnation replay; no inference helper."""
 
+    sampling: Literal["stale_uniform", "disagreement_balanced", "aggregated_teaching"] = (
+        "stale_uniform"
+    )
     parent_steps: int = 1048576
     additional_steps: int = Field(default=131072, ge=65536)
     route_coefficient: float = Field(default=0.02, ge=0, le=0.1, allow_inf_nan=False)
@@ -201,8 +204,10 @@ class TrainingConfig(FrozenConfig):
                 )
             if self.learning_rate != self.final_learning_rate:
                 raise ValueError("Recovery requires constant learning rate")
+            if r.sampling == "aggregated_teaching" and r.probe_count < 32:
+                raise ValueError("Teaching requires at least 32 stratified train probes")
             if (
-                r.parent_steps != 1048576
+                r.parent_steps != (1572864 if r.sampling != "stale_uniform" else 1048576)
                 or r.parent_steps % self.skills.eval_interval
                 or r.additional_steps % self.skills.eval_interval
                 or r.additional_steps < self.skills.p3_minimum

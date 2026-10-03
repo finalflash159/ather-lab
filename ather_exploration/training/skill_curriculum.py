@@ -24,6 +24,10 @@ class SkillController:
     p3_minimum: int = 65536
     p3_task_budget: int = 524288
     recovery_p3b_budget: int | None = None
+    recovery_p3c_budget: int | None = None
+    p4_enabled: bool = False
+    p4_task_budget: int = 1048576
+    p4_minimum: int = 65536
 
     def observe_restart(self, level, progress, window, rate):
         """Public novelty mastery; separate from validation gate and task promotion."""
@@ -43,10 +47,16 @@ class SkillController:
 
     @property
     def minimum(self):
+        if self.p4_enabled and self.task.startswith("P4"):
+            return self.p4_minimum
         return self.p3_minimum if self.task.startswith("P3") else MINIMUM[self.index]
 
     @property
     def budget(self):
+        if self.p4_enabled and self.task.startswith("P4"):
+            return self.p4_task_budget
+        if self.task == "P3c" and self.recovery_p3c_budget is not None:
+            return self.recovery_p3c_budget
         if self.task == "P3b" and self.recovery_p3b_budget is not None:
             return self.recovery_p3b_budget
         if self.task.startswith("P3"):

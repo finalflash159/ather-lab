@@ -29,7 +29,19 @@ def prepare_recovery(path, config, env):
     old = TrainingConfig.model_validate(metadata["config"]).model_dump(mode="json")
     new = config.model_dump(mode="json")
     state = json.loads((parent / "runner_state.json").read_text())
-    initial = old["recovery"] is None
+    balanced = config.recovery.sampling != "stale_uniform"
+    aggregated = config.recovery.sampling == "aggregated_teaching"
+    protocol = (
+        "public-route-teaching-v3"
+        if aggregated
+        else "public-route-disagreement-v2"
+        if balanced
+        else PROTOCOL
+    )
+    branch = (
+        balanced and old["recovery"] is not None and old["recovery"]["sampling"] == "stale_uniform"
+    )
+    initial = old["recovery"] is None or branch
     allowed = {"banks", "device", "tracking"} | ({"recovery", "p3_resume"} if initial else set())
     if any(old[key] != new[key] for key in new if key not in allowed):
         raise ValueError("Recovery config differs outside the audited transfer fields")
@@ -46,7 +58,23 @@ def prepare_recovery(path, config, env):
         or metadata["env_steps"] % (config.n_envs * config.n_steps)
     ):
         raise ValueError("Recovery parent state/schema/split/boundary mismatch")
-    if initial:
+    if branch:
+        if (
+            metadata["source_revision"]
+            != "b8ab7598e58dcf56820a13aba394e16a88e055cdb28777e0ed79c52dd9421a88"
+            or metadata["env_steps"] != 1572864
+            or controller.task != "P3c"
+            or state.get("transfer", {}).get("protocol") != PROTOCOL
+        ):
+            raise ValueError("Balanced recovery requires audited P3c best step_1572864")
+        allowed_recovery = {"sampling", "parent_steps", "additional_steps"}
+        if any(
+            old["recovery"][k] != new["recovery"][k]
+            for k in new["recovery"]
+            if k not in allowed_recovery
+        ):
+            raise ValueError("Balanced branch changes more than sampling and budget")
+    elif initial:
         if (
             metadata["source_revision"] != PARENT_SOURCE
             or metadata["env_steps"] != config.recovery.parent_steps
@@ -56,7 +84,7 @@ def prepare_recovery(path, config, env):
             raise ValueError("Recovery starts from audited completion checkpoint step_1048576")
     elif (
         metadata["source_revision"] != implementation_id()
-        or state.get("transfer", {}).get("protocol") != PROTOCOL
+        or state.get("transfer", {}).get("protocol") != protocol
     ):
         raise ValueError("Recovery resume protocol/source mismatch")
     model = RoutePPO.load(parent / "model.zip", env=env, device=config.device)
@@ -74,7 +102,14 @@ def prepare_recovery(path, config, env):
         for v in slot.values()
     ):
         raise ValueError("Nonfinite parent Adam state")
-    model.route_coefficient = config.recovery.route_coefficient
+    model.route_coefficient = 0.0 if aggregated else config.recovery.route_coefficient
+    if aggregated:
+        from ather_exploration.training.route_teaching import RouteMemory
+
+        if initial:
+            model.route_memory = RouteMemory(seed=config.seed)
+        elif not hasattr(model, "route_memory") or not model.route_memory.initialized:
+            raise ValueError("Teaching resume is missing its persistent dataset")
     model.route_samples = []
     if initial:
         old_controller = copy.deepcopy(state["skill_controller"])
@@ -83,24 +118,35 @@ def prepare_recovery(path, config, env):
         controller.restart_level = 0
         controller.restart_results = []
         controller.best_by_task = {}
-        controller.recovery_p3b_budget = config.recovery.additional_steps
+        if branch:
+            controller.recovery_p3c_budget = config.recovery.additional_steps
+        else:
+            controller.recovery_p3b_budget = config.recovery.additional_steps
         state["skill_controller"] = asdict(controller)
         # No carry-over of biased early-prefix pools. Preserve sampler RNG only.
         for worker in state["workers"]:
             worker.pop("prefix_archive", None)
             worker.pop("unfinished", None)
         audit = {
-            "protocol": PROTOCOL,
-            "learning_objective": "ppo_public_route_aux",
+            "protocol": protocol,
+            "learning_objective": "ppo_separate_public_teaching"
+            if aggregated
+            else "ppo_public_route_aux",
             "parent_env_steps": model.num_timesteps,
             "parent_source_revision": metadata["source_revision"],
             "parent_checksums": json.loads((parent / "checksums.json").read_text()),
             "parent_controller": old_controller,
             "parent_checkpoint": str(parent),
             "reward_map_gate_changed": False,
-            "reset": ["prefix archive", "gate streak", "current best selection", "live episodes"],
+            "reset": (
+                ["gate streak", "current best selection", "live episodes"]
+                if branch
+                else ["prefix archive", "gate streak", "current best selection", "live episodes"]
+            ),
+            "archive_preserved": branch,
+            "sampling": config.recovery.sampling,
             "preserved": ["weights", "Adam", "global counters", "sampler RNG", "validation split"],
-            "probe_steps": 0,
+            "probe_steps": state.get("transfer", {}).get("probe_steps", 0) if branch else 0,
         }
     else:
         audit = copy.deepcopy(state["transfer"])

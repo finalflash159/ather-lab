@@ -1,0 +1,88 @@
+# Separate public teaching from PPO; continue audited P3c best.
+method: ppo
+seed: 0
+total_timesteps: 4063232
+n_envs: 16
+n_steps: 256
+batch_size: 1024
+n_epochs: 4
+gamma: 0.999
+gae_lambda: 0.95
+ent_coef: 0.01
+learning_rate: 0.0001
+final_learning_rate: 0.0001
+device: cpu
+vec_backend: subproc
+torch_threads: 1
+checkpoint_updates: 4
+trace_every: 0
+recovery:
+  sampling: aggregated_teaching
+  parent_steps: 1572864
+  additional_steps: 507904
+  route_coefficient: 0.02
+  label_limit: 256
+  label_after: 8
+  stagnation_steps: 16
+  lookback: 8
+  minimum_remaining: 64
+  restart_probability: 0.25
+  pool_per_kind: 24
+  probe_count: 64
+skills:
+  enabled: true
+  frontier: true
+  p3_visit_bonus: 0.002
+  p3_visit_cap: 0.1
+  stop_after: P3
+  train_count: 256
+  validation_count: 64
+  eval_interval: 16384
+  activation: 0.5
+  death: 2.0
+  first_visit: false
+  wall_mask: false
+  p1_reward:
+    area: 0.0
+    discovery: 0.0
+    activation: 0.5
+    step_cost: 0.01
+  p2c_horizon: 192
+  p2_task_budget: 262144
+  p2_gates:
+    discovery_success: 0.95
+    approach_efficiency: 0.60
+    coverage: 0.75
+    coverage_auc: 0.50
+  p2_reward:
+    area: 0.01
+    discovery: 0.05
+    activation: 0.5
+    step_cost: 0.005
+    wall_penalty: 0.02
+  p3_horizon: 256
+  p3_minimum: 65536
+  p3_task_budget: 524288
+  p3_reward:
+    area: 0.01
+    discovery: 0.05
+    activation: 0.5
+    wall_penalty: 0.02
+    room_exploration: 1.0
+  p3_gates:
+    success: 0.80
+    stochastic_success: 0.75
+    coverage: 0.75
+    coverage_auc: 0.50
+    room_coverage: 0.50
+    room_coverage_auc: 0.50
+    joint_success: 0.70
+    subgroup_success: 0.60
+    wall_block: 0.10
+banks:
+  small: ../../../artifacts/banks-skills/small
+  medium: ../../../artifacts/banks-skills/medium
+  large: ../../../artifacts/banks-skills/large
+tracking:
+  mode: online
+  project: ather-exploration
