@@ -34,7 +34,7 @@ def test_p2_wait_block_activation_and_repeat_reward():
     env.reset()
     for action in (4, 0, 0):  # spawn(1,1), blocked north
         _, reward, _, _, info = env.step(action)
-        assert reward == pytest.approx(-0.005)
+        assert reward == pytest.approx(-0.005 if action == 4 else -0.025)
         assert info["skill"]["reward_components"]["area"] == 0
     env.close()
     env = configured_skill_env("P1a", 100020, skills, phase="P2b")
@@ -197,6 +197,7 @@ def parent_checkpoint(tmp_path):
     # Recreate a legacy metadata envelope in the temporary fixture only.
     meta = json.loads((path / "metadata.json").read_text())
     meta["source_revision"] = P1_TRANSFER_SOURCE
+    meta["curriculum_protocol"] = "active-phase-v1"
     del meta["config"]["skills"]["p2_reward"]
     rewrite(path, "metadata.json", meta)
     dest = cfg.model_copy(update={"skills": cfg.skills.model_copy(update={"stop_after": "P2"})})
@@ -287,7 +288,19 @@ def test_transfer_runner_and_p2_ui_lifecycle(parent_checkpoint, tmp_path, monkey
 
     def evaluate(self, task):
         evaluated.append(task)
-        return {"passed": True, "summary": {"deterministic": {"success": 1.0, "missing": None}}}
+        return {
+            "passed": True,
+            "task": task,
+            "summary": {
+                "deterministic": {
+                    "success": 1.0,
+                    "efficiency": 1.0,
+                    "approach_efficiency": 1.0,
+                    "coverage": 1.0,
+                    "coverage_auc": 1.0,
+                }
+            },
+        }
 
     monkeypatch.setattr(SkillCallback, "evaluate", evaluate)
 
@@ -297,7 +310,7 @@ def test_transfer_runner_and_p2_ui_lifecycle(parent_checkpoint, tmp_path, monkey
         assert kwargs["total_timesteps"] == cfg.total_timesteps - 98304
         callback.init_callback(self)
         self._last_obs = self.env.reset()
-        for step in (131072, 147456, 180224, 196608):
+        for step in (131072, 147456, 180224, 196608, 229376, 245760):
             self.num_timesteps = step
             callback.boundary()
         return self
@@ -308,16 +321,23 @@ def test_transfer_runner_and_p2_ui_lifecycle(parent_checkpoint, tmp_path, monkey
         cfg, root, resume=path, continue_curriculum=True, transfer_p1_to_p2=True
     )
     assert result["state"] == "PHASE_COMPLETED"
-    assert evaluated == ["P2a", "P2a", "P2b", "P2b"]
-    cp = root / "checkpoints/step_196608"
+    assert evaluated == ["P2a", "P2a", "P2b", "P2b", "P2c", "P2c"]
+    cp = root / "checkpoints/step_245760"
     _, meta = inspect_checkpoint(cp)
-    assert meta["viewer_task"] == "P2b"
-    assert meta["skill_controller"]["index"] == 4
+    assert meta["viewer_task"] == "P2c"
+    assert meta["skill_controller"]["index"] == 5
     assert meta["transfer"]["parent_env_steps"] == 98304
     assert (root / "transfer.json").exists()
+    from ather_exploration.worlds.scenarios import read_record
+
+    best = read_record(root / "best.json")["by_task"]
+    assert set(best) == {"P2a", "P2b", "P2c"}
+    for record in best.values():
+        assert record["run_id"] == root.name
+        assert (root / record["checkpoint"] / "READY").exists()
     session = EpisodeSession(SessionSpec(agent="checkpoint", checkpoint=str(cp), seed=17))
     try:
-        assert session.frame()["phase"] == "P2b"
+        assert session.frame()["phase"] == "P2c"
         assert session.env.step_cost == 0.005
         session.step()
         assert session.total_reward == pytest.approx(session.metrics.steps[-1]["learning_reward"])
@@ -353,3 +373,150 @@ def test_p2_four_subprocess_workers_share_phase_reward():
             assert rows[0]["reward_components"]["step_cost"] == pytest.approx(-0.48)
     finally:
         env.close()
+
+
+def test_p2_streak_minimum_and_independent_budgets():
+    c = SkillController(index=2, phase_start=98304, family_start=98304)
+    assert not c.observe(True, 114688)
+    assert c.history[-1]["streak"] == 1 and not c.history[-1]["eligible"]
+    assert c.observe(True, 131072)
+    assert c.task == "P2b"
+    assert not c.observe(False, 147456)
+    assert c.passed == 0
+    assert not c.observe(False, 360448)  # family cap no longer ends P2b prematurely
+    assert not c.failed
+    assert not c.observe(False, 393216)
+    assert c.failed
+
+
+def test_p2c_activation_continues_and_reward_is_once():
+    env = configured_skill_env(
+        "P1a", 100020, SkillConfig(enabled=True, p2c_horizon=32), phase="P2c"
+    )
+    env.reset()
+    _, reward, term, trunc, info = env.step(0)
+    assert not term and not trunc
+    assert info["skill"]["reward_components"]["activation"] == 0.5
+    for action in (1, 0):
+        _, reward, term, trunc, info = env.step(action)
+        assert info["skill"]["reward_components"]["activation"] == 0
+        assert reward == pytest.approx(sum(info["skill"]["reward_components"].values()))
+    for _ in range(29):
+        _, _, term, trunc, info = env.step(4)
+    assert (term or trunc) and info["skill"]["success"]
+    env.close()
+
+
+def test_p2b_latched_discovery_suppresses_only_later_area():
+    from ather_exploration.types import ACTION_DELTAS
+    from ather_exploration.worlds.topology import distances
+
+    env = configured_skill_env("P2b", 17, SkillConfig(enabled=True))
+    obs, _ = env.reset()
+    sc = env.unwrapped.scenario
+    ds = distances(sc.terrain, [sc.pois[0]])
+    pos = sc.spawn
+    seen = False
+    while pos != sc.pois[0]:
+        a = next(
+            a
+            for a, (dx, dy) in enumerate(ACTION_DELTAS[:4])
+            if ds.get((pos[0] + dx, pos[1] + dy), 999) < ds[pos]
+        )
+        obs, r, term, _trunc, info = env.step(a)
+        rc = info["skill"]["reward_components"]
+        if seen:
+            assert rc["area"] == 0
+        else:
+            assert rc["area"] == pytest.approx(info["transition"]["new_floor"] * 0.01)
+        seen = seen or bool(obs["memory"][3:5].any())
+        assert env.poi_seen == seen
+        pos = tuple(x + y for x, y in zip(pos, ACTION_DELTAS[a], strict=True))
+        assert r == pytest.approx(sum(rc.values()))
+    assert seen and term
+    env.close()
+
+
+def test_p2c_generator_hidden_and_disjoint_pool():
+    from ather_exploration.worlds.skill_tasks import skill_pool
+
+    for seed, _ in skill_pool("P2c", 8):
+        env = configured_skill_env("P2c", seed, SkillConfig(enabled=True))
+        obs, _ = env.reset()
+        assert not obs["memory"][3:5].any()
+        assert len(env.unwrapped.scenario.pois) == 1
+        assert not env.unwrapped.scenario.routes
+        assert env.unwrapped.scenario.horizon == 192
+        env.close()
+    assert not ({h for _, h in skill_pool("P2c", 8)} & {h for _, h in skill_pool("P2c", 4, True)})
+
+
+def test_p2b_p2c_geometry_uses_same_content_split():
+    from ather_exploration.worlds.skill_tasks import skill_pool
+
+    for validation in (False, True):
+        assert skill_pool("P2b", 8, validation) == skill_pool("P2c", 8, validation)
+
+
+def test_task_best_prioritizes_gate_and_current_objective():
+    from ather_exploration.training.skill_runner import task_score
+
+    def result(task, passed, efficiency, approach, coverage):
+        return {
+            "task": task,
+            "passed": passed,
+            "summary": {
+                "deterministic": {
+                    "success": 1.0,
+                    "efficiency": efficiency,
+                    "approach_efficiency": approach,
+                    "coverage": coverage,
+                    "coverage_auc": coverage,
+                    "wall_block": 0.0,
+                }
+            },
+        }
+
+    assert task_score(result("P2a", True, 0.7, 0.1, 0.1)) > task_score(
+        result("P2a", False, 0.9, 0.9, 0.9)
+    )
+    assert task_score(result("P2a", True, 0.9, 0.1, 0.1)) > task_score(
+        result("P2a", True, 0.7, 0.9, 0.9)
+    )
+    assert task_score(result("P2b", True, 0.1, 0.9, 0.1)) > task_score(
+        result("P2b", True, 0.9, 0.7, 0.9)
+    )
+    assert task_score(result("P2c", True, 0.1, 0.1, 0.9)) > task_score(
+        result("P2c", True, 0.9, 0.9, 0.7)
+    )
+
+
+@pytest.mark.parametrize("phase", ["P2a", "P2b", "P2c"])
+def test_ui_skill_reward_accounting_through_full_episode(monkeypatch, phase):
+    import ather_exploration.ui.session as ui
+    from ather_exploration.types import ACTION_DELTAS
+    from ather_exploration.worlds.topology import distances
+
+    env = configured_skill_env(phase, 42, SkillConfig(enabled=True))
+    monkeypatch.setattr(ui, "make_fixture_env", lambda _: env)
+    s = ui.EpisodeSession(ui.SessionSpec(fixture="skill", agent="manual"))
+    sc = env.unwrapped.scenario
+    ds = distances(sc.terrain, [sc.pois[0]])
+    pos = sc.spawn
+    try:
+        while pos != sc.pois[0]:
+            a = next(
+                a
+                for a, (dx, dy) in enumerate(ACTION_DELTAS[:4])
+                if ds.get((pos[0] + dx, pos[1] + dy), 999) < ds[pos]
+            )
+            frame = s.step(a)
+            assert frame["row"]["learning_reward"] == pytest.approx(
+                sum(frame["row"]["skill_reward_components"].values())
+            )
+            pos = tuple(x + y for x, y in zip(pos, ACTION_DELTAS[a], strict=True))
+        while not s.done:
+            s.step(4)
+        assert s.result["skill_success"]
+    finally:
+        s.close()

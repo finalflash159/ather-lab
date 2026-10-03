@@ -2,7 +2,7 @@
 
 Partially observed exploration with persistent POIs and patrolling threats, built on MiniGrid 3.1.0. The project includes procedural maps, public spatial memory, random/frontier baselines, PPO/RecurrentPPO, checkpoint evaluation, a local inference viewer, and headless Modal training with W&B metrics.
 
-The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates for the active phase only; easier maps inherit that phase’s reward, horizon and termination rules. P3 continues after POI activation until its horizon. No task-ID input or old-task retention exams are used; hitting a skill budget without passing stops the run. A single-seed P1 pilot passed both validation gates at 98,304 environment steps. P2 learning quality remains to be evaluated.
+The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obstacles, explore hidden rooms, manage threats, then train on the target map distribution. Promotion requires validation gates for the active phase only; easier maps inherit that phase’s reward, horizon and termination rules. P3 continues after POI activation until its horizon. No task-ID input or old-task retention exams are used; hitting a skill budget without passing stops the run. A single-seed P1 pilot passed both validation gates at 98,304 environment steps. The revised exploration curriculum uses provisional pilot gates; its learning quality remains to be evaluated.
 
 ## Setup and checks
 
@@ -27,9 +27,19 @@ The second command **trains**. Configure W&B credentials or set tracking mode to
 
 `skills.yaml` enables the full sequence and requires target banks at its configured paths. Use `build-suite --help` to create them. Continuing from a completed phase requires a new output directory, `--resume PATH_TO_STEP`, `--continue-curriculum`, and a config with a later `skills.stop_after`. Architecture and other training settings must stay compatible.
 
+## Multi-room continuation
+
+`skills_p3.yaml` transfers a completed exploration checkpoint into three lessons: two connected rooms, three rooms with two POIs, then four rooms with chain/cycle layouts. Terrain splits are invariant to rotation/reflection and independent of spawn/POI placement. The active reward keeps area/discovery/activation bonuses and a blocked-move penalty, with no per-step cost. Episodes continue to their horizon. Joint POI-and-coverage gates and unfinished-task diagnostics distinguish exploration failures from time spent after completion.
+
+```bash
+.venv/bin/python -m ather_exploration train-check --config ather_exploration/resources/training/skills_p3.yaml --resume artifacts/modal/skills-p2-02-resume-01/checkpoints/step_376832 --transfer-p2-to-p3
+```
+
+For training, supply `--transfer-p2-to-p3`, `--continue-curriculum` and the same parent checkpoint with a new output/run ID. Modal accepts the same flags. Upload a fresh dataset for the changed source. `evaluate-skills --help` exposes frozen validation/OOD evaluation for learned policies and baselines; it never trains. These are pilot gates, not demonstrated learning results.
+
 ## P2 continuation
 
-`skills_p2.yaml` stops after P2 and adds a 0.005 cost to every action while retaining first-observation coverage and POI rewards. It preserves PPO settings and the full learning-rate schedule. Diagnostics separate searching for a POI from reaching it after discovery; missing events are null with explicit sample counts.
+`skills_p2.yaml` runs visible-goal navigation, hidden-goal search, then full-horizon exploration. Every action costs 0.005; blocked moves cost an additional 0.02. Coverage rewards stop after discovery in the search task, remain active in full-horizon exploration, and are disabled for visible-goal navigation. It preserves PPO settings and the full learning-rate schedule. Diagnostics separate searching for a POI from reaching it after discovery; missing events are null with explicit sample counts.
 
 For the audited legacy P1 source, use `--transfer-p1-to-p2` together with `--resume` and `--continue-curriculum` on training commands. A no-learning local check is:
 

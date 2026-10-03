@@ -77,7 +77,7 @@ class Viewer:
         if spec.checkpoint:
             from ather_exploration.training.checkpoints import inspect_checkpoint
 
-            path, _ = inspect_checkpoint(spec.checkpoint)
+            path, _ = inspect_checkpoint(spec.checkpoint, inference=True)
             spec = replace(spec, checkpoint=str(path))
         pygame.init()
         pygame.display.set_caption("Ather | Agent viewer")
@@ -180,7 +180,7 @@ class Viewer:
         frame = self.controller.frame
         status = self.controller.error or self.controller.state
         self.text(
-            f"{self.spec.preset} | seed {self.spec.seed} | {self.spec.agent} | {status}",
+            f"{(self.controller.frame or {}).get('phase') or self.spec.preset} | seed {self.spec.seed} | {self.spec.agent} | {status}",
             20,
             115,
             RED if self.controller.error else BLUE,

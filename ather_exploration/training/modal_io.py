@@ -112,11 +112,11 @@ def download_run(volume, run_id, output):
                 candidate = staging / "checkpoint"
                 for name in sorted(FILES | {"checksums.json", "READY"}):
                     fetch(volume, f"{remote_root}/{relative}/{name}", candidate / name)
-                inspect_checkpoint(candidate)
+                inspect_checkpoint(candidate, inference=True)
                 destination.parent.mkdir(exist_ok=True)
                 candidate.rename(destination)
             else:
-                inspect_checkpoint(destination)
+                inspect_checkpoint(destination, inference=True)
         latest = f"runs/{run_id}/latest.json"
         if latest in available:
             fetch(volume, f"/{latest}", staging / "latest.json")

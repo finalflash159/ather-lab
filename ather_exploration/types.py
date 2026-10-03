@@ -113,7 +113,11 @@ class Scenario:
             "P1b",
             "P2a",
             "P2b",
+            "P2c",
             "P3",
+            "P3a",
+            "P3b",
+            "P3c",
             "P4a",
             "P4b",
         ):

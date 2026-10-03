@@ -1,4 +1,4 @@
-# P2-only continuation from a completed P1; see notes/SKILL_CURRICULUM_GUIDE.md.
+# Fixed P3a LR trial from step_655360; see notes/P3_LR_TRIAL_GUIDE.md.
 method: ppo
 seed: 0
 total_timesteps: 4063232
@@ -6,8 +6,8 @@ n_envs: 4
 n_steps: 256
 batch_size: 256
 n_epochs: 4
-learning_rate: 0.0003
-final_learning_rate: 0.00003
+learning_rate: 0.0001
+final_learning_rate: 0.0001
 device: cpu
 vec_backend: subproc
 torch_threads: 1
@@ -15,7 +15,7 @@ checkpoint_updates: 16
 trace_every: 0
 skills:
   enabled: true
-  stop_after: P2
+  stop_after: P3
   train_count: 256
   validation_count: 64
   eval_interval: 16384
@@ -43,6 +43,22 @@ skills:
     activation: 0.5
     step_cost: 0.005
     wall_penalty: 0.02
+  p3_horizon: 256
+  p3_minimum: 65536
+  p3_task_budget: 524288
+  p3_reward:
+    area: 0.01
+    discovery: 0.05
+    activation: 0.5
+    wall_penalty: 0.02
+  p3_gates:
+    success: 0.80
+    stochastic_success: 0.75
+    coverage: 0.75
+    coverage_auc: 0.50
+    joint_success: 0.70
+    subgroup_success: 0.60
+    wall_block: 0.10
 banks:
   small: ../../../artifacts/banks-skills/small
   medium: ../../../artifacts/banks-skills/medium
@@ -50,3 +66,9 @@ banks:
 tracking:
   mode: online
   project: ather-exploration
+
+# Explicit audited branch; never promotes to P3b.
+lr_trial:
+  parent_steps: 655360
+  additional_steps: 65536
+  task: P3a

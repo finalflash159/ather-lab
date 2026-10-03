@@ -104,12 +104,14 @@ def main() -> None:
     train_parser.add_argument("--resume", type=Path)
     train_parser.add_argument("--continue-curriculum", action="store_true")
     train_parser.add_argument("--transfer-p1-to-p2", action="store_true")
+    train_parser.add_argument("--transfer-p2-to-p3", action="store_true")
     preflight = commands.add_parser(
         "train-check", help="Validate training config/banks; NO learning"
     )
     preflight.add_argument("--config", type=Path, required=True)
     preflight.add_argument("--resume", type=Path)
     preflight.add_argument("--transfer-p1-to-p2", action="store_true")
+    preflight.add_argument("--transfer-p2-to-p3", action="store_true")
     replay_parser = commands.add_parser("replay", help="Verify recorded actions without a policy")
     replay_parser.add_argument("--file", type=Path, required=True)
     policy_eval = commands.add_parser(
@@ -125,6 +127,24 @@ def main() -> None:
     policy_eval.add_argument("--output", type=Path, required=True)
     policy_eval.add_argument("--action-seed", type=int, default=0)
     policy_eval.add_argument("--stochastic", action="store_true")
+    skill_eval = commands.add_parser(
+        "evaluate-skills", help="Evaluate P3 validation/OOD without learning"
+    )
+    skill_eval.add_argument("--config", type=Path, required=True)
+    skill_eval.add_argument(
+        "--tasks", nargs="+", choices=("P3a", "P3b", "P3c"), default=["P3a", "P3b", "P3c"]
+    )
+    source_eval = skill_eval.add_mutually_exclusive_group(required=True)
+    source_eval.add_argument("--checkpoint", type=Path)
+    source_eval.add_argument("--agent", choices=("random", "frontier"))
+    skill_eval.add_argument("--split", choices=("validation", "ood"), default="validation")
+    skill_eval.add_argument(
+        "--count",
+        type=int,
+        choices=range(4, 65),
+        help="Optional diagnostic subset (4..64); gate runs use config count",
+    )
+    skill_eval.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "build-skills":
@@ -137,6 +157,10 @@ def main() -> None:
                 "output": str(args.output),
                 "tasks": list(manifest["tasks"]),
             }
+        elif args.command == "evaluate-skills":
+            from ather_exploration.evaluation.skill_cli import evaluate_cli
+
+            result = evaluate_cli(args)
         elif args.command in ("train", "train-check"):
             from ather_exploration.training.config import read_training_config
 
@@ -150,15 +174,63 @@ def main() -> None:
                     if config.skills.enabled
                     else WorldBank(config.banks).identities
                 )
-                if args.resume and not args.transfer_p1_to_p2:
-                    raise ValueError("train-check --resume requires --transfer-p1-to-p2")
-                if args.transfer_p1_to_p2 and not args.resume:
-                    raise ValueError("P1 transfer check requires --resume")
+                if args.transfer_p1_to_p2 and args.transfer_p2_to_p3:
+                    raise ValueError("Choose one transfer protocol")
+                if args.resume and not (
+                    args.transfer_p1_to_p2
+                    or args.transfer_p2_to_p3
+                    or config.lr_trial
+                    or config.p3_restart
+                    or config.unfinished_trial
+                    or config.p3_resume
+                    or config.recovery
+                ):
+                    raise ValueError(
+                        "train-check --resume requires an explicit skill transfer flag"
+                    )
+                if (args.transfer_p1_to_p2 or args.transfer_p2_to_p3) and not args.resume:
+                    raise ValueError("Transfer check requires --resume")
+                if config.lr_trial and (
+                    not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3
+                ):
+                    raise ValueError("LR trial check requires only --resume")
                 transfer_check = {}
-                if args.transfer_p1_to_p2:
-                    from ather_exploration.training.skill_transfer import check_p1_transfer
+                if config.unfinished_trial:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("Unfinished trial check requires only --resume")
+                    from ather_exploration.training.unfinished_trial import check_unfinished
 
-                    transfer_check = check_p1_transfer(args.resume, config)
+                    transfer_check = check_unfinished(args.resume, config)
+                if config.recovery:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("Recovery check requires only --resume")
+                    from ather_exploration.training.recovery import check_recovery
+
+                    transfer_check = check_recovery(args.resume, config)
+                if config.p3_resume:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("P3 completion resume check requires only --resume")
+                    from ather_exploration.training.p3_completion import check_p3_resume
+
+                    transfer_check = check_p3_resume(args.resume, config)
+                if config.p3_restart:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("P3 restart check requires only --resume")
+                    from ather_exploration.training.p3_restart import check_restart
+
+                    transfer_check = check_restart(args.resume, config)
+                if config.lr_trial:
+                    from ather_exploration.training.lr_trial import check_trial
+
+                    transfer_check = check_trial(args.resume, config)
+                if args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                    from ather_exploration.training.skill_transfer import (
+                        check_p1_transfer,
+                        check_p2_transfer,
+                    )
+
+                    check = check_p2_transfer if args.transfer_p2_to_p3 else check_p1_transfer
+                    transfer_check = check(args.resume, config)
                 result = {
                     **transfer_check,
                     "status": "valid",
@@ -175,6 +247,7 @@ def main() -> None:
                     resume=args.resume,
                     continue_curriculum=args.continue_curriculum,
                     transfer_p1_to_p2=args.transfer_p1_to_p2,
+                    transfer_p2_to_p3=args.transfer_p2_to_p3,
                 )
         elif args.command == "evaluate-policy":
             from ather_exploration.evaluation.learned import evaluate_checkpoint

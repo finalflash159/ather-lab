@@ -192,6 +192,7 @@ def run_training(
     run_metadata=None,
     continue_curriculum=False,
     transfer_p1_to_p2=False,
+    transfer_p2_to_p3=False,
 ):
     if config.skills.enabled:
         from ather_exploration.training.skill_runner import run_skill_training
@@ -204,8 +205,9 @@ def run_training(
             run_metadata=run_metadata,
             continue_curriculum=continue_curriculum,
             transfer_p1_to_p2=transfer_p1_to_p2,
+            transfer_p2_to_p3=transfer_p2_to_p3,
         )
-    if continue_curriculum or transfer_p1_to_p2:
+    if continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3:
         raise ValueError("Continuation is only for skills")
     root = Path(output).resolve()
     if root.exists():

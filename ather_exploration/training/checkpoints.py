@@ -36,7 +36,21 @@ def resolve_checkpoint(path):
     return path
 
 
-def inspect_checkpoint(path, *, transfer_p1_to_p2=False):
+# UI accounting-only compatibility; environment/policy/training semantics unchanged.
+VIEWER_COMPATIBLE_SOURCES = {"4859629ea0a94f3a1e17e1a331283f799a325a6a6889d85543e4b72c934ae1f3"}
+
+
+def inspect_checkpoint(
+    path,
+    *,
+    transfer_p1_to_p2=False,
+    transfer_p2_to_p3=False,
+    lr_trial=False,
+    inference=False,
+    unfinished_trial=False,
+    p3_resume=False,
+    recovery=False,
+):
     path = resolve_checkpoint(path)
     if not (path / "READY").is_file():
         raise ValueError("Checkpoint is not READY")
@@ -50,14 +64,41 @@ def inspect_checkpoint(path, *, transfer_p1_to_p2=False):
     meta = json.loads((path / "metadata.json").read_text())
     if meta.get("artifact_schema") != "g4-checkpoint-v1":
         raise ValueError("Unsupported checkpoint schema")
+    trial_source = "bed19cee2bd2ad77385fc5c8f72250b35b6efe3344c78c992d288764f9503e05"
     if meta.get("source_revision") != implementation_id() and (
-        not transfer_p1_to_p2 or meta.get("source_revision") != P1_TRANSFER_SOURCE
+        not (
+            (lr_trial or inference)
+            and meta.get("source_revision")
+            in (trial_source, "9cba25c4713de6ca8f212b7b59e051b8e430371ed4f79b1a8ac9ce294d90d259")
+        )
+        and not (
+            (unfinished_trial or inference)
+            and meta.get("source_revision")
+            == "b1caee3c156a4723864d0a465629765ac26a000ea7babc345404b1ffaf7a75be"
+        )
+        and not (
+            p3_resume
+            and meta.get("source_revision")
+            == "b1caee3c156a4723864d0a465629765ac26a000ea7babc345404b1ffaf7a75be"
+        )
+        and not (
+            (recovery or inference)
+            and meta.get("source_revision")
+            == "28e2dff54a78e80dd1b2f53ae1de6f667b1ddc8ef69aec554b5e9c0461e73e8b"
+        )
+        and not (transfer_p1_to_p2 and meta.get("source_revision") == P1_TRANSFER_SOURCE)
+        and not (
+            (inference or transfer_p2_to_p3)
+            and meta.get("source_revision")
+            in (VIEWER_COMPATIBLE_SOURCES | ({P1_TRANSFER_SOURCE} if inference else set()))
+        )
     ):
         raise ValueError("Checkpoint source revision differs from current code")
     if transfer_p1_to_p2:
         state = json.loads((path / "runner_state.json").read_text())
         if (
-            meta.get("curriculum_protocol") != "active-phase-v1"
+            meta.get("curriculum_protocol")
+            not in ("active-phase-v1", "active-phase-v2", "active-phase-v3")
             or meta.get("viewer_task") != "P1b"
             or meta.get("config", {}).get("skills", {}).get("stop_after") != "P1"
             or state.get("state") != "PHASE_COMPLETED"
@@ -65,6 +106,24 @@ def inspect_checkpoint(path, *, transfer_p1_to_p2=False):
             or state.get("skill_controller", {}).get("failed")
         ):
             raise ValueError("P1 transfer requires a completed P1 checkpoint ready for P2a")
+    if transfer_p2_to_p3:
+        state = json.loads((path / "runner_state.json").read_text())
+        controller = state.get("skill_controller", {})
+        history = controller.get("history", [])
+        if (
+            meta.get("curriculum_protocol") not in ("active-phase-v2", "active-phase-v3")
+            or meta.get("viewer_task") != "P2c"
+            or meta.get("config", {}).get("skills", {}).get("stop_after") != "P2"
+            or state.get("state") != "PHASE_COMPLETED"
+            or controller.get("index") != 5
+            or controller.get("failed")
+            or len(history) < 2
+            or any(h.get("task") != "P2c" or not h.get("passed") for h in history[-2:])
+            or not history[-1].get("eligible")
+            or history[-1].get("steps") != meta.get("env_steps")
+            or history[-1].get("streak", 0) < 2
+        ):
+            raise ValueError("P2 transfer requires completed P2c with two passing gates")
     algorithm(meta["method"])
     return path, meta
 
@@ -80,6 +139,7 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
         meta = {
             "artifact_schema": "g4-checkpoint-v1",
             "method": config.method,
+            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
             "env_steps": model.num_timesteps,
             "source_revision": implementation_id(),
             "schema": schema_signature(model.observation_space),
@@ -98,7 +158,7 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
             "skill_controller": runner_state.get("skill_controller"),
             "viewer_task": runner_state.get("viewer_task"),
             "transfer": runner_state.get("transfer"),
-            "curriculum_protocol": "active-phase-v1" if config.skills.enabled else None,
+            "curriculum_protocol": "active-phase-v3" if config.skills.enabled else None,
             "boundary": "completed_update" if model._n_updates else "initialization_only",
             "optimizer_updates": model._n_updates,
             "resume": "optimizer/counters/RNG/sampler; reset episodes/LSTM",
@@ -130,7 +190,7 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
 
 
 def load_agent(path, observation_space, *, device="cpu"):
-    path, meta = inspect_checkpoint(path)
+    path, meta = inspect_checkpoint(path, inference=True)
     if schema_signature(observation_space) != meta["schema"]:
         raise ValueError("Checkpoint observation/action schema incompatible with environment")
     from sb3_contrib import MaskablePPO

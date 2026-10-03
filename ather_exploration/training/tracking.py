@@ -20,11 +20,12 @@ def start_tracking(config, root, bank_ids, parent_checkpoint=None):
         dir=str(root),
         config={
             "training": config.model_dump(mode="json"),
+            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
             "bank_ids": bank_ids,
             "source_revision": implementation_id(),
             "parent_checkpoint": str(parent_checkpoint) if parent_checkpoint else None,
         },
-        tags=[config.method, "development"],
+        tags=[config.method, "development"] + (["public-route-aux"] if config.recovery else []),
     )
     try:
         run.define_metric("training/env_steps")
