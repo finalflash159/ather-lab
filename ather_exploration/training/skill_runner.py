@@ -23,6 +23,21 @@ from ather_exploration.training.skill_environments import SkillTrainingEnv, skil
 from ather_exploration.worlds.scenarios import implementation_id, write_record
 
 
+def task_score(result):
+    """Gate satisfaction first; quality tie-breaks belong to the current objective."""
+    d = result["summary"]["deterministic"]
+    if result["task"].startswith("P3"):
+        quality = [d["joint_success"], d["success"], d["coverage_auc"]]
+    elif result["task"] == "P2c":
+        quality = [d["success"], d["coverage_auc"], d["coverage"]]
+    else:
+        quality = [
+            d["success"],
+            d["approach_efficiency"] if result["task"] == "P2b" else d["efficiency"],
+        ]
+    return [int(result["passed"]), *quality, -d.get("wall_block", 0.0)]
+
+
 class SkillStop(Exception):
     """Intentional gate stop at a fully saved optimizer boundary."""
 
@@ -63,14 +78,60 @@ class SkillCallback(BaseCallback):
         self.viewer_task = controller.task
         self.episodes = []
         self.transfer = None
+        self.route_seen = set()
+        self.route_candidates = 0
 
     def _on_step(self):
         if not np.isfinite(self.locals["rewards"]).all():
             raise ValueError("Nonfinite rewards")
+        if self.config.recovery:
+            import hashlib
+
+            from ather_exploration.training.public_route import public_route
+
+            for i, info in enumerate(self.locals["infos"]):
+                if not info.get("route_eligible"):
+                    continue
+                obs = {key: value[i] for key, value in self.model._last_obs.items()}
+                # Deduplicate geometry + goal + agent position, ignoring age/time/visit counts.
+                digest = hashlib.sha256(obs["memory"][[0, 1, 2, 3, 4, 7]].tobytes()).digest()
+                if digest in self.route_seen:
+                    continue
+                self.route_seen.add(digest)
+                route = public_route(obs)
+                if route is None:
+                    continue
+                self.route_candidates += 1
+                sample = ({key: value.copy() for key, value in obs.items()}, route["actions"])
+                limit = self.config.recovery.label_limit
+                if len(self.model.route_samples) < limit:
+                    self.model.route_samples.append(sample)
+                else:
+                    index = int(np.random.randint(self.route_candidates))
+                    if index < limit:
+                        self.model.route_samples[index] = sample
         for worker in self.training_env.env_method("drain"):
             for row in worker:
                 append_jsonl(self.root / "train_episodes.jsonl", row)
                 self.episodes.append(row)
+                trial = self.config.unfinished_trial or self.config.p3_resume
+                if (
+                    trial
+                    and row.get("restart_used")
+                    and not row.get("cancelled")
+                    and self.controller.observe_restart(
+                        row["restart_level"],
+                        row["restart_progress"],
+                        trial.mastery_episodes,
+                        trial.mastery_rate,
+                    )
+                ):
+                    self.training_env.env_method("set_restart_level", self.controller.restart_level)
+                    print(
+                        f"[restart] unlocked prefix band {self.controller.restart_level}; "
+                        "criterion: room or POI progress after replay, not the task gate",
+                        flush=True,
+                    )
         self.episodes = self.episodes[-256:]
         return True
 
@@ -80,7 +141,7 @@ class SkillCallback(BaseCallback):
         if self.saved == steps:
             return
         configs = {}
-        if self.controller.index >= 7 and self.state != "PHASE_COMPLETED":
+        if self.controller.task.startswith("P5") and self.state != "PHASE_COMPLETED":
             from ather_exploration.training.curriculum import WorldBank
 
             bank = WorldBank(self.config.banks)
@@ -105,6 +166,12 @@ class SkillCallback(BaseCallback):
         )
         write_record(self.root / "latest.json", {"checkpoint": path}, replace=True)
         self.saved = steps
+        if self.controller.best_by_task:
+            write_record(
+                self.root / "best.json",
+                {"by_task": self.controller.best_by_task, "target": self.controller.best},
+                replace=True,
+            )
         if self.publish:
             self.publish()
 
@@ -173,7 +240,9 @@ class SkillCallback(BaseCallback):
                     "activation",
                     "death",
                     "intrinsic",
+                    "room_exploration",
                     "step_cost",
+                    "wall_penalty",
                 ):
                     values = [
                         r["reward_components"][component]
@@ -182,9 +251,94 @@ class SkillCallback(BaseCallback):
                     ]
                     if values:
                         metrics[f"skill_train/{task}/reward_{component}"] = float(np.mean(values))
+        if self.config.unfinished_trial or self.config.p3_resume:
+            completed = [r for r in self.episodes if not r.get("cancelled")]
+            if completed:
+                metrics["restart/used_fraction"] = float(
+                    np.mean([r.get("restart_used", False) for r in completed])
+                )
+                metrics["restart/fallback_fraction"] = float(
+                    np.mean(
+                        [
+                            r.get("restart_requested", False) and not r.get("restart_used", False)
+                            for r in completed
+                        ]
+                    )
+                )
+                metrics["restart/progress_fraction"] = float(
+                    np.mean(
+                        [
+                            r.get("restart_progress", False)
+                            for r in completed
+                            if r.get("restart_used")
+                        ]
+                    )
+                    if any(r.get("restart_used") for r in completed)
+                    else 0.0
+                )
+                metrics["restart/prefix_candidates"] = float(
+                    np.mean([r.get("prefix_candidates", 0) for r in completed])
+                )
+                qualities = [
+                    quality for row in completed for quality in row.get("prefix_qualities", [])
+                ]
+                if qualities:
+                    metrics["restart/prefix_quality"] = float(np.mean(qualities))
+            metrics["restart/level"] = self.controller.restart_level
+            metrics["restart/reconstruction_steps"] = float(
+                max((r.get("reconstruction_steps_total", 0) for r in completed), default=0)
+            )
+            if self.config.p3_resume:
+                summaries = [
+                    summary
+                    for summary in self.training_env.env_method("archive_summary")
+                    if summary is not None
+                ]
+                metrics["restart/archive_pool_items"] = float(
+                    np.mean(
+                        [
+                            sum(sum(bands) for bands in summary["counts"].values())
+                            for summary in summaries
+                        ]
+                    )
+                )
+                for task in ("P3b", "P3c"):
+                    for band, count in enumerate(
+                        zip(
+                            *[summary["counts"][task] for summary in summaries],
+                            strict=True,
+                        )
+                    ):
+                        metrics[f"restart/archive_{task}_band_{band}"] = float(np.mean(count))
+        if self.config.recovery:
+            metrics["train/route_label_fraction"] = len(self.model.route_samples) / (
+                self.config.n_envs * self.config.n_steps
+            )
+            metrics["training/probe_steps"] = self.transfer["probe_steps"]
+            metrics["restart/reconstruction_steps"] = sum(
+                s["replay_steps"] for s in self.training_env.env_method("archive_summary")
+            )
+            metrics["training/parent_steps"] = self.config.recovery.parent_steps
+            metrics["training/branch_steps"] = steps - self.config.recovery.parent_steps
+            completed = [r for r in self.episodes if not r.get("cancelled")]
+            restarted = [r for r in completed if r.get("restart_used")]
+            metrics["restart/resolved_fraction"] = (
+                float(np.mean([r["recovery_resolved"] for r in restarted])) if restarted else 0.0
+            )
+            for source in ("P3a", "P3b", "P3c"):
+                for kind in (False, True):
+                    rows = [
+                        r
+                        for r in completed
+                        if r.get("source_task") == source and r.get("restart_used") == kind
+                    ]
+                    if rows:
+                        metrics[
+                            f"skill_train/{source}/{'restarted' if kind else 'normal'}_success"
+                        ] = float(np.mean([bool(r["success"]) for r in rows]))
         changed = False
         if steps % self.config.skills.eval_interval == 0:
-            if self.controller.index < 7:
+            if not self.controller.task.startswith("P5"):
                 result = self.evaluate(self.controller.task)
                 passed = result["passed"]
                 # Advancement depends only on the current objective's validation.
@@ -194,9 +348,44 @@ class SkillCallback(BaseCallback):
                         if v is not None:
                             metrics[f"skills/{self.controller.task}/{mode}/{k}"] = v
                 previous = self.controller.task
-                changed = self.controller.observe(passed, steps)
+                score = task_score(result)
+                prior = self.controller.best_by_task.get(previous)
+                if prior is None or tuple(score) > tuple(prior["score"]):
+                    self.controller.best_by_task[previous] = {
+                        "run_id": self.root.name,
+                        "checkpoint": f"checkpoints/step_{steps}",
+                        "score": score,
+                        "summary": result["summary"],
+                        "passed": passed,
+                    }
+                gate_budget = self.controller.budget
+                if self.config.lr_trial or self.config.unfinished_trial:
+                    self.controller.passed = self.controller.passed + 1 if passed else 0
+                    self.controller.history.append(
+                        {
+                            "task": previous,
+                            "steps": steps,
+                            "passed": bool(passed),
+                            "elapsed": steps - self.controller.phase_start,
+                            "minimum": self.controller.minimum,
+                            "eligible": steps - self.controller.phase_start
+                            >= self.controller.minimum,
+                            "streak": self.controller.passed,
+                            "promotion_disabled": True,
+                        }
+                    )
+                else:
+                    changed = self.controller.observe(passed, steps)
+                gate = self.controller.history[-1]
+                print(
+                    f"[gate:{previous}] raw_pass={passed} eligible={gate['eligible']} "
+                    f"streak={gate['streak']}/2 elapsed={gate['elapsed']} "
+                    f"minimum={gate['minimum']} budget="
+                    f"{gate_budget}",
+                    flush=True,
+                )
                 if self.controller.failed:
-                    self.state = "PHASE_GATE_FAILED"
+                    self.state = "REVIEW_REQUIRED" if self.config.recovery else "PHASE_GATE_FAILED"
                 if (
                     changed
                     and previous[:2] == self.config.skills.stop_after
@@ -234,15 +423,29 @@ class SkillCallback(BaseCallback):
                     and steps - self.controller.phase_start
                     >= (self.config.total_timesteps - self.controller.phase_start) // 2
                 ):
-                    self.controller.index = 8
+                    self.controller.index += 1
                     changed = True
+        if (
+            self.config.lr_trial
+            and steps >= self.config.lr_trial.parent_steps + self.config.lr_trial.additional_steps
+        ):
+            self.state = "EXPERIMENT_COMPLETED"
+        if (
+            self.config.unfinished_trial
+            and steps
+            >= self.config.unfinished_trial.parent_steps
+            + self.config.unfinished_trial.additional_steps
+        ):
+            self.state = "EXPERIMENT_COMPLETED"
         self.viewer_task = (
             previous if changed and self.state == "PHASE_COMPLETED" else self.controller.task
         )
         if changed:
             self.training_env.env_method("cancel_episode", "phase_transition")
             self.training_env.env_method("set_controller", asdict(self.controller))
+            self.training_env.env_method("set_restart_level", self.controller.restart_level)
             if self.state == "RUNNING":
+                self.seed_recovery()
                 self.model._last_obs = self.training_env.reset()
                 self.model._last_episode_starts = np.ones(self.config.n_envs, dtype=bool)
             for records in self.training_env.env_method("drain"):
@@ -268,8 +471,18 @@ class SkillCallback(BaseCallback):
                 "metrics": metrics,
             },
         )
+        trial = self.config.unfinished_trial or self.config.lr_trial
+        end_steps = (
+            trial.parent_steps + trial.additional_steps if trial else self.config.total_timesteps
+        )
+        if self.config.recovery:
+            end_steps = (
+                self.controller.phase_start + self.controller.budget
+                if self.controller.task in ("P3b", "P3c")
+                else steps
+            )
         print(
-            f"[skills:{self.root.name}] {steps:,}/{self.config.total_timesteps:,} task={self.controller.task} state={self.state} "
+            f"[skills:{self.root.name}] {steps:,}/{end_steps:,} task={self.controller.task} state={self.state} "
             + " ".join(
                 f"{key}={metrics[key]:.5g}"
                 for key in ("train/loss", "train/policy_gradient_loss", "train/value_loss")
@@ -288,8 +501,56 @@ class SkillCallback(BaseCallback):
         if self.state != "RUNNING":
             raise SkillStop(self.state)
 
+    def seed_recovery(self):
+        if not self.config.recovery or self.controller.task not in ("P3b", "P3c"):
+            return
+        task = self.controller.task
+        probed = self.training_env.env_method("recovery_probed")
+        if all(task in tasks for tasks in probed):
+            return
+        from ather_exploration.agents.route_ppo import RoutePPO
+        from ather_exploration.training.recovery import training_probes
+
+        # Frozen original parent, including when entering P3c. No gradient or PPO samples.
+        py, ns, ts = random.getstate(), np.random.get_state(), torch.get_rng_state()
+        cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        try:
+            parent = RoutePPO.load(
+                Path(self.transfer["parent_checkpoint"]) / "model.zip", device=self.config.device
+            )
+            items, count = training_probes(parent, self.config, task)
+            for worker in range(self.config.n_envs):
+                self.training_env.env_method(
+                    "seed_recovery_archive",
+                    task,
+                    items[worker :: self.config.n_envs],
+                    indices=worker,
+                )
+            self.transfer["probe_steps"] += count
+            append_jsonl(
+                self.root / "recovery_probes.jsonl",
+                {"task": task, "steps": count, "items": len(items), "split": "train"},
+            )
+            print(
+                f"[recovery] {task}: {count} frozen probe steps, {len(items)} prefixes; excluded from PPO",
+                flush=True,
+            )
+        finally:
+            random.setstate(py)
+            np.random.set_state(ns)
+            torch.set_rng_state(ts)
+            if cuda:
+                torch.cuda.set_rng_state_all(cuda)
+
+    def _on_training_start(self):
+        self.seed_recovery()
+
     def _on_rollout_start(self):
         self.boundary()
+        if self.config.recovery:
+            self.model.route_samples = []
+            self.route_seen.clear()
+            self.route_candidates = 0
 
     def _on_training_end(self):
         self.boundary()
@@ -304,14 +565,33 @@ def run_skill_training(
     run_metadata=None,
     continue_curriculum=False,
     transfer_p1_to_p2=False,
+    transfer_p2_to_p3=False,
 ):
     root = Path(output).resolve()
     if root.exists():
         raise FileExistsError("Use a new run directory")
     if continue_curriculum and resume is None:
         raise ValueError("Continuation requires --resume")
-    if transfer_p1_to_p2 and (not continue_curriculum or resume is None):
-        raise ValueError("P1 transfer requires --resume and --continue-curriculum")
+    if (transfer_p1_to_p2 or transfer_p2_to_p3) and (not continue_curriculum or resume is None):
+        raise ValueError("Transfer requires --resume and --continue-curriculum")
+    if transfer_p1_to_p2 and transfer_p2_to_p3:
+        raise ValueError("Choose one transfer protocol")
+    if config.p3_restart and (
+        not resume or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P3 restart requires only --resume")
+    if config.lr_trial and (
+        resume is None or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("LR trial requires only --resume; no curriculum transfer flags")
+    if (config.p3_resume or config.recovery) and (
+        resume is None or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P3 completion resume requires only --resume")
+    if config.unfinished_trial and (
+        resume is None or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("Unfinished trial requires only --resume")
     identities = preflight(config)
     root.mkdir(parents=True)
     write_record(
@@ -321,7 +601,8 @@ def run_skill_training(
             "source_revision": implementation_id(),
             "bank_ids": identities,
             "scope": "skill_curriculum_pilot",
-            "curriculum_protocol": "active-phase-v1",
+            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
+            "curriculum_protocol": "active-phase-v3",
             "resume": str(resume) if resume else None,
         },
     )
@@ -342,12 +623,67 @@ def run_skill_training(
             if config.vec_backend == "dummy"
             else SubprocVecEnv(factories, start_method="spawn")
         )
-        controller = SkillController()
+        controller = SkillController(
+            p2_task_budget=config.skills.p2_task_budget,
+            p3_minimum=config.skills.p3_minimum,
+            p3_task_budget=config.skills.p3_task_budget,
+        )
         transfer = None
-        if transfer_p1_to_p2:
-            from ather_exploration.training.skill_transfer import prepare_p1_transfer
+        if config.recovery:
+            from ather_exploration.training.recovery import prepare_recovery
 
-            model, state, transfer = prepare_p1_transfer(resume, config, env)
+            model, state, transfer = prepare_recovery(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            for i, worker in enumerate(state["workers"]):
+                env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["resume_rng_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif config.p3_resume:
+            from ather_exploration.training.p3_completion import prepare_p3_resume
+
+            model, state, transfer = prepare_p3_resume(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            for i, worker in enumerate(state["workers"]):
+                env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["resume_rng_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif config.unfinished_trial:
+            from ather_exploration.training.unfinished_trial import prepare_unfinished
+
+            model, state, transfer = prepare_unfinished(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            for i, worker in enumerate(state["workers"]):
+                env.env_method("restore", worker, indices=i)
+            parent, _ = inspect_checkpoint(resume, unfinished_trial=True)
+            restore_rng(parent)
+            write_record(root / "transfer.json", transfer)
+        elif (
+            config.p3_restart
+            and inspect_checkpoint(resume, lr_trial=True)[1]["schema"]["version"] == 1
+        ):
+            from ather_exploration.training.p3_restart import prepare_restart
+
+            model, state, transfer = prepare_restart(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            restore_rng(Path(transfer["parent_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif config.lr_trial:
+            from ather_exploration.training.lr_trial import prepare_trial
+
+            model, state, transfer = prepare_trial(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            for i, worker in enumerate(state["workers"]):
+                env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["parent_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif transfer_p1_to_p2 or transfer_p2_to_p3:
+            from ather_exploration.training.skill_transfer import (
+                prepare_p1_transfer,
+                prepare_p2_transfer,
+            )
+
+            prepare = prepare_p2_transfer if transfer_p2_to_p3 else prepare_p1_transfer
+            model, state, transfer = prepare(resume, config, env)
             controller = SkillController(**state["skill_controller"])
             for i, worker in enumerate(state["workers"]):
                 env.env_method("restore", worker, indices=i)
@@ -355,7 +691,9 @@ def run_skill_training(
             write_record(root / "transfer.json", transfer)
         elif resume:
             parent, meta = inspect_checkpoint(resume)
-            old = meta["config"]
+            from ather_exploration.training.config import TrainingConfig
+
+            old = TrainingConfig.model_validate(meta["config"]).model_dump(mode="json")
             new = config.model_dump(mode="json")
             if continue_curriculum:
                 if new["skills"]["stop_after"] <= old["skills"]["stop_after"]:
@@ -390,6 +728,7 @@ def run_skill_training(
         else:
             model = build_model(config, env)
         env.env_method("set_controller", asdict(controller))
+        env.env_method("set_restart_level", controller.restart_level)
         tracker = start_tracking(config, root, identities, resume)
         model.set_logger(configure(str(root / "tensorboard"), ["tensorboard", "csv"]))
         callback = SkillCallback(config, root, controller, identities, on_boundary)
@@ -399,7 +738,17 @@ def run_skill_training(
         write_record(root / "run_status.json", {"state": "RUNNING"}, replace=True)
         try:
             model.learn(
-                total_timesteps=config.total_timesteps - model.num_timesteps,
+                total_timesteps=(
+                    config.unfinished_trial.parent_steps
+                    + config.unfinished_trial.additional_steps
+                    - model.num_timesteps
+                    if config.unfinished_trial
+                    else config.lr_trial.parent_steps
+                    + config.lr_trial.additional_steps
+                    - model.num_timesteps
+                    if config.lr_trial
+                    else config.total_timesteps - model.num_timesteps
+                ),
                 reset_num_timesteps=False,
                 callback=callback,
                 log_interval=None,
@@ -414,7 +763,7 @@ def run_skill_training(
             "state": callback.state
             if callback.state != "RUNNING"
             else "COMPLETED"
-            if controller.index >= 7
+            if controller.task.startswith("P5")
             else "BUDGET_EXHAUSTED",
             "actual_env_steps": model.num_timesteps,
             "latest_checkpoint_steps": callback.saved,
