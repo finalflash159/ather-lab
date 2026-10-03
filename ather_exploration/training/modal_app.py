@@ -11,9 +11,9 @@ from ather_exploration.training.modal_io import VOLUME_NAME, identifier
 
 ROOT = Path(__file__).resolve().parents[2]
 MOUNT = Path("/data")
-GPU = os.environ.get("ATHER_MODAL_GPU", "L4")
-CPU = int(os.environ.get("ATHER_MODAL_CPU", "8"))
-MEMORY = int(os.environ.get("ATHER_MODAL_MEMORY", "16384"))
+GPU = os.environ.get("ATHER_MODAL_GPU", "A100")
+CPU = int(os.environ.get("ATHER_MODAL_CPU", "24"))
+MEMORY = int(os.environ.get("ATHER_MODAL_MEMORY", "65536"))
 if CPU < 1 or MEMORY < 1024:
     raise ValueError("Invalid Modal CPU/RAM allocation")
 
@@ -40,6 +40,9 @@ image = image.run_commands(sync_command).env(
         "PYTHONPATH": "/app/.venv/lib/python3.11/site-packages:/app",
         "SDL_VIDEODRIVER": "dummy",
         "SDL_AUDIODRIVER": "dummy",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
     }
 )
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -89,6 +92,7 @@ def execute(
     resume: str = "",
     continue_curriculum: bool = False,
     transfer_p1_to_p2: bool = False,
+    transfer_p2_to_p3: bool = False,
 ):
     import torch
 
@@ -110,6 +114,8 @@ def execute(
         "source_revision": implementation_id(),
         "dataset": dataset,
     }
+    if transfer_p1_to_p2 and transfer_p2_to_p3:
+        raise ValueError("Choose one transfer protocol")
     parent = None
     if resume:
         # Explicit checkpoint boundary only; immutable parent, new attempt/run ID.
@@ -118,17 +124,58 @@ def execute(
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}/checkpoints/step_[0-9]+", resume):
             raise ValueError("resume must be RUN_ID/checkpoints/step_N")
         parent = MOUNT / "runs" / resume
-    if transfer_p1_to_p2 and (not resume or not continue_curriculum):
-        raise ValueError("P1 transfer requires --resume and --continue-curriculum")
+    if (transfer_p1_to_p2 or transfer_p2_to_p3) and (not resume or not continue_curriculum):
+        raise ValueError("Transfer requires --resume and --continue-curriculum")
+    if (config.p3_resume or config.recovery) and (
+        not parent or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P3 completion resume requires only --resume")
+    if config.unfinished_trial and (
+        not parent or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("Unfinished trial requires only --resume")
     if command == "check" and parent:
-        if not transfer_p1_to_p2:
-            raise ValueError("Remote resume check requires --transfer-p1-to-p2")
-        from ather_exploration.training.skill_transfer import check_p1_transfer
+        if config.recovery:
+            from ather_exploration.training.recovery import check_recovery
+
+            return {**resources, **check_recovery(parent, config)}
+        if config.p3_resume:
+            from ather_exploration.training.p3_completion import check_p3_resume
+
+            result = check_p3_resume(parent, config)
+            torch.cuda.synchronize()
+            return {**resources, **result, "cuda_forward_env_step": "pass"}
+        if config.unfinished_trial:
+            from ather_exploration.training.unfinished_trial import check_unfinished
+
+            return {**resources, **check_unfinished(parent, config)}
+        if config.p3_restart:
+            if continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3:
+                raise ValueError("P3 restart requires only --resume")
+            from ather_exploration.training.p3_restart import check_restart
+
+            return {**resources, **check_restart(parent, config)}
+        if config.lr_trial:
+            if continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3:
+                raise ValueError("LR trial uses only --resume")
+            from ather_exploration.training.lr_trial import check_trial
+
+            return {**resources, **check_trial(parent, config)}
+        if not (transfer_p1_to_p2 or transfer_p2_to_p3):
+            raise ValueError("Remote resume check requires an explicit skill transfer flag")
+        from ather_exploration.training.skill_transfer import check_p1_transfer, check_p2_transfer
 
         torch.set_num_threads(config.torch_threads)
-        result = check_p1_transfer(parent, config)
+        check = check_p2_transfer if transfer_p2_to_p3 else check_p1_transfer
+        result = check(parent, config)
         torch.cuda.synchronize()
         return {**resources, **result, "cuda_forward_env_step": "pass"}
+    if config.p3_restart and not parent:
+        raise ValueError("P3 restart requires --resume")
+    if (config.p3_resume or config.recovery) and not parent:
+        raise ValueError("P3 completion resume requires --resume")
+    if config.lr_trial and not parent:
+        raise ValueError("LR trial requires --resume")
     if command == "check":
         torch.set_num_threads(config.torch_threads)
         if config.skills.enabled:
@@ -171,6 +218,7 @@ def execute(
                 resume=parent,
                 continue_curriculum=continue_curriculum,
                 transfer_p1_to_p2=transfer_p1_to_p2,
+                transfer_p2_to_p3=transfer_p2_to_p3,
                 on_boundary=publish,
                 run_metadata=resources,
             )
@@ -275,6 +323,7 @@ def main(
     resume: str = "",
     continue_curriculum: bool = False,
     transfer_p1_to_p2: bool = False,
+    transfer_p2_to_p3: bool = False,
 ):
     from ather_exploration.training.config import read_training_config
 
@@ -297,6 +346,13 @@ def main(
     )
     print(
         execute.remote(
-            payload, dataset, command, run_id, resume, continue_curriculum, transfer_p1_to_p2
+            payload,
+            dataset,
+            command,
+            run_id,
+            resume,
+            continue_curriculum,
+            transfer_p1_to_p2,
+            transfer_p2_to_p3,
         )
     )

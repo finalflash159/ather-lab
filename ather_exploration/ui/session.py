@@ -62,7 +62,7 @@ class EpisodeSession:
             if spec.checkpoint and not spec.config_path:
                 from ather_exploration.training.checkpoints import inspect_checkpoint
 
-                _, metadata = inspect_checkpoint(spec.checkpoint)
+                _, metadata = inspect_checkpoint(spec.checkpoint, inference=True)
                 stored = metadata.get("environment_configs", {}).get(spec.preset)
                 if stored is not None:
                     config = EnvConfig.model_validate(stored)
@@ -146,6 +146,12 @@ class EpisodeSession:
                 deterministic=self.spec.deterministic,
                 action_rng=self.rng,
             )
+        # Skill search reward changes after first sighting. Capture the effective
+        # weights BEFORE stepping: the discovery transition still earns area reward.
+        weights = self.env.unwrapped.reward_config
+        if getattr(self.env, "phase", None) == "P2b" and self.env.poi_seen:
+            weights = weights.model_copy(update={"area": 0.0})
+        self.metrics.reward_config = weights
         self.obs, reward, terminated, truncated, info = self.env.step(action)
         core = self.env.unwrapped
         row = self.metrics.update(
