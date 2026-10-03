@@ -17,7 +17,11 @@ class ExplorationEncoder(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim=256)
         local = observation_space["local"].shape
         memory = observation_space["memory"].shape
-        if local[0] != 6 or memory != (11, 81, 81) or observation_space["state"].shape != (17,):
+        if (
+            local[0] != 6
+            or memory not in ((11, 81, 81), (12, 81, 81))
+            or observation_space["state"].shape != (17,)
+        ):
             raise ValueError("Incompatible symbolic observation shapes")
         self.local = nn.Sequential(
             nn.Conv2d(6, 32, 3, padding=1),
@@ -29,7 +33,7 @@ class ExplorationEncoder(BaseFeaturesExtractor):
             nn.ReLU(),
         )
         self.memory = nn.Sequential(
-            nn.Conv2d(11, 16, 5, stride=2, padding=2),
+            nn.Conv2d(memory[0], 16, 5, stride=2, padding=2),
             nn.ReLU(),
             nn.Conv2d(16, 32, 3, stride=2, padding=1),
             nn.ReLU(),
@@ -57,10 +61,11 @@ class ExplorationEncoder(BaseFeaturesExtractor):
 
 def schema_signature(space):
     return {
-        "version": 1,
+        "version": 2 if space["memory"].shape[0] == 12 else 1,
         "channels": {
             "local": list(LOCAL_CHANNELS),
-            "memory": list(MEMORY_CHANNELS),
+            "memory": list(MEMORY_CHANNELS)
+            + (["frontier"] if space["memory"].shape[0] == 12 else []),
             "state": list(STATE_FIELDS),
         },
         "shapes": {k: list(v.shape) for k, v in space.spaces.items()},

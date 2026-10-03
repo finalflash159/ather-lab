@@ -139,7 +139,17 @@ def test_curriculum_lifecycle_without_learning(tmp_path, monkeypatch):
         evaluated_tasks.append(task)
         return {
             "passed": True,
-            "summary": {"deterministic": {"success": 1.0}, "stochastic": {"success": 1.0}},
+            "task": task,
+            "summary": {
+                "deterministic": {
+                    "success": 1.0,
+                    "efficiency": 1.0,
+                    "approach_efficiency": 1.0,
+                    "coverage": 1.0,
+                    "coverage_auc": 1.0,
+                },
+                "stochastic": {"success": 1.0},
+            },
         }
 
     monkeypatch.setattr(SkillCallback, "evaluate", fake_evaluate)
@@ -172,7 +182,7 @@ def test_curriculum_lifecycle_without_learning(tmp_path, monkeypatch):
     def continue_learn(self, *, callback, **kwargs):
         callback.init_callback(self)
         self._last_obs = self.env.reset()
-        for step in (131072, 147456, 180224, 196608):
+        for step in (131072, 147456, 180224, 196608, 229376, 245760):
             self.num_timesteps = step
             callback.boundary()
         return self
@@ -186,8 +196,8 @@ def test_curriculum_lifecycle_without_learning(tmp_path, monkeypatch):
         continue_curriculum=True,
     )
     assert continued["state"] == "PHASE_COMPLETED"
-    assert continued["skill_controller"]["index"] == 4
-    assert evaluated_tasks == ["P1a", "P1a", "P1b", "P1b", "P2a", "P2a", "P2b", "P2b"]
+    assert continued["skill_controller"]["index"] == 5
+    assert evaluated_tasks == ["P1a", "P1a", "P1b", "P1b", "P2a", "P2a", "P2b", "P2b", "P2c", "P2c"]
 
 
 def test_skill_viewer_loads_task_from_checkpoint(tmp_path):
@@ -293,7 +303,9 @@ def test_p1_reward_resolver_preserves_later_tasks():
 
     for task in ("P1a", "P1b", "P2a", "P3", "P4b"):
         env = configured_skill_env(task, 0, SkillConfig(enabled=True))
-        assert env.unwrapped.reward_config.area == (0 if task.startswith("P1") else 0.01)
+        assert env.unwrapped.reward_config.area == (
+            0 if task.startswith("P1") or task == "P2a" else 0.01
+        )
         assert env.step_cost == (0.005 if task.startswith(("P1", "P2")) else 0)
         env.close()
 
@@ -348,7 +360,7 @@ def test_easy_map_inherits_active_phase_rules(phase, horizon, early):
     assert env.phase == phase
     assert env.unwrapped.scenario.skill_task == "P1a"
     assert env.unwrapped.scenario.horizon == horizon
-    assert env.unwrapped.reward_config.area == 0.01
+    assert env.unwrapped.reward_config.area == (0 if phase == "P2a" else 0.01)
     assert env.step_cost == (0.005 if phase.startswith("P2") else 0)
     _, _, term, trunc, info = env.step(0)
     assert info["transition"]["activated"]
@@ -374,13 +386,13 @@ def test_worker_logs_phase_separately_from_map(monkeypatch):
         skills=SkillConfig(enabled=True, train_count=8),
     )
     env = SkillTrainingEnv(config)
-    env.set_controller({"index": 4})
+    env.set_controller({"index": 5})
     env.reset()
-    assert env.env.phase == "P3"
+    assert env.env.phase == "P3a"
     assert env.env.unwrapped.scenario.horizon == 256
     env.cancel_episode("test")
     row = env.drain()[0]
-    assert row["task"] == "P3"
+    assert row["task"] == "P3a"
     assert row["source_task"] == "P1a"
     env.close()
 

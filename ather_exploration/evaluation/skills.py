@@ -56,10 +56,21 @@ class SearchDiagnostics:
         }
 
 
-def evaluate_skill(model, task, config):
-    agent = LearnedAgent(model, {})
+def evaluate_skill(model, task, config, *, agent=None, split="validation"):
+    from ather_exploration.evaluation.p3 import ExplorationDiagnostics, add_p3_gates
+    from ather_exploration.worlds.p3_tasks import map_group, p3_pool
+
+    agent = agent if agent is not None else LearnedAgent(model, {})
+    is_p3 = task in ("P3a", "P3b", "P3c")
+    if split not in ("validation", "ood") or (split == "ood" and not is_p3):
+        raise ValueError("Choose validation or P3 OOD; heldout test is not a tuning split")
+    pool = (
+        p3_pool(task, config.skills.validation_count, split)
+        if is_p3
+        else skill_pool(task, config.skills.validation_count, True)
+    )
     rows = []
-    for seed, _ in skill_pool(task, config.skills.validation_count, True):
+    for seed, _ in pool:
         for deterministic in (True, False):
             for action_seed in range(1 if deterministic else 3):
                 env = configured_skill_env(task, seed, config.skills)
@@ -80,16 +91,51 @@ def evaluate_skill(model, task, config):
                     visited = {position}
                     components = {}
                     floors = sum(row.count(".") for row in scenario.terrain)
-                    initial_coverage = float(obs["memory"][2].sum()) / floors
                     coverage_history = []
+                    approach_distance = d if SearchDiagnostics.sees_poi(obs) else None
+                    actual_position = scenario.spawn
+                    no_progress = longest_no_progress = 0
                     search = SearchDiagnostics(obs, floors)
+                    exploration = ExplorationDiagnostics(scenario, obs) if is_p3 else None
+                    initial_coverage = (
+                        exploration.coverage
+                        if exploration
+                        else float(obs["memory"][2].sum()) / floors
+                    )
                     for t in range(scenario.horizon):
                         action, state = agent.act(
                             obs, state, deterministic=deterministic, action_rng=rng
                         )
                         obs, _, term, trunc, info = env.step(action)
                         search.update(t + 1, obs, info["transition"])
-                        coverage_history.append(float(obs["memory"][2].sum()) / floors)
+                        actual_position = tuple(
+                            a + b
+                            for a, b in zip(
+                                actual_position, info["transition"]["actual_delta"], strict=True
+                            )
+                        )
+                        if approach_distance is None and search.first_seen is not None:
+                            approach_distance = min(
+                                distances(scenario.terrain, [actual_position])[p]
+                                for p in scenario.pois
+                            )
+                        progress = (
+                            info["transition"]["new_floor"] or info["transition"]["activated"]
+                        )
+                        if exploration:
+                            exploration.update(
+                                t + 1,
+                                obs,
+                                env.unwrapped.evaluator_snapshot().activated_pois,
+                                progress=progress,
+                            )
+                        no_progress = 0 if progress else no_progress + 1
+                        longest_no_progress = max(longest_no_progress, no_progress)
+                        coverage_history.append(
+                            exploration.coverage
+                            if exploration
+                            else float(obs["memory"][2].sum()) / floors
+                        )
                         blocked += int(obs["state"][6])
                         moves += int(action != 4)
                         waits += int(action == 4)
@@ -105,6 +151,15 @@ def evaluate_skill(model, task, config):
                     success = info["skill"]["success"]
                     snapshot = env.unwrapped.evaluator_snapshot()
                     coverage = coverage_history[-1]
+                    tile_coverage = float(obs["memory"][2].sum()) / floors
+                    room_coverage_min = (
+                        exploration.room_coverage_min if exploration else tile_coverage
+                    )
+                    coverage_threshold = (
+                        config.skills.p3_gates.room_coverage
+                        if task in ("P3b", "P3c")
+                        else config.skills.p3_gates.coverage
+                    )
                     coverage_auc = (
                         sum(coverage_history)
                         + (scenario.horizon - len(coverage_history)) * coverage
@@ -112,6 +167,21 @@ def evaluate_skill(model, task, config):
                     rows.append(
                         {
                             **search.row(),
+                            **(exploration.row() if exploration else {}),
+                            **(map_group(scenario) if is_p3 else {}),
+                            "joint_success": float(success and coverage >= coverage_threshold),
+                            "approach_efficiency": (
+                                approach_distance
+                                / max(
+                                    search.first_activation - search.first_seen,
+                                    approach_distance,
+                                    1,
+                                )
+                                if search.first_activation is not None
+                                and approach_distance is not None
+                                else 0.0
+                            ),
+                            "longest_no_progress_streak": longest_no_progress,
                             "seed": seed,
                             "deterministic": deterministic,
                             "action_seed": action_seed,
@@ -120,6 +190,8 @@ def evaluate_skill(model, task, config):
                             "timing_bucket": seed % 3,
                             "success": float(success),
                             "coverage": coverage,
+                            "tile_coverage": tile_coverage,
+                            "room_coverage_min": room_coverage_min,
                             "coverage_gain": coverage - initial_coverage,
                             "coverage_auc": coverage_auc,
                             "activation": len(snapshot.activated_pois) / len(scenario.pois),
@@ -141,10 +213,12 @@ def evaluate_skill(model, task, config):
     for mode in (True, False):
         selected = [r for r in rows if r["deterministic"] == mode]
         summary["deterministic" if mode else "stochastic"] = {
-            key: float(np.mean([r[key] for r in selected]))
+            key: float(np.mean([r.get(key, 0.0) for r in selected]))
             for key in (
                 "success",
                 "coverage",
+                "tile_coverage",
+                "room_coverage_min",
                 "coverage_gain",
                 "coverage_auc",
                 "activation",
@@ -161,7 +235,11 @@ def evaluate_skill(model, task, config):
                 "reward_activation",
                 "reward_death",
                 "reward_intrinsic",
+                "reward_room_exploration",
                 "reward_step_cost",
+                "reward_wall_penalty",
+                "approach_efficiency",
+                "longest_no_progress_streak",
             )
         }
         mode_summary = summary["deterministic" if mode else "stochastic"]
@@ -175,7 +253,7 @@ def evaluate_skill(model, task, config):
             "coverage_gain_after_seen",
             "longest_wall_block_streak",
         ):
-            values = [r[key] for r in selected if r[key] is not None]
+            values = [r.get(key, 0.0) for r in selected if r[key] is not None]
             mode_summary[key] = float(np.mean(values)) if values else None
             mode_summary[f"{key}_count"] = len(values)
         if task in ("P3", "P4b"):
@@ -203,10 +281,16 @@ def evaluate_skill(model, task, config):
         "P1b": (0.95, 0.90),
         "P2a": (0.90, 0.85),
         "P2b": (0.90, 0.85),
+        "P2c": (0.90, 0.85),
         "P3": (0.80, 0.75),
         "P4a": (0.85, 0.80),
         "P4b": (0.65, 0.65),
     }
+    if is_p3:
+        thresholds[task] = (
+            config.skills.p3_gates.success,
+            config.skills.p3_gates.stochastic_success,
+        )
     passed = True
     for i, m in enumerate(("deterministic", "stochastic")):
         passed &= check(f"{m}/success", summary[m]["success"], thresholds[task][i])
@@ -220,7 +304,25 @@ def evaluate_skill(model, task, config):
             )
         passed &= check("deterministic/efficiency", summary["deterministic"]["efficiency"], 0.75)
     if task.startswith("P2"):
-        passed &= check("deterministic/efficiency", summary["deterministic"]["efficiency"], 0.60)
+        d = summary["deterministic"]
+        if task == "P2a":
+            passed &= check("deterministic/efficiency", d["efficiency"], 0.60)
+        elif task == "P2b":
+            passed &= check(
+                "deterministic/poi_seen", d["poi_seen"], config.skills.p2_gates.discovery_success
+            )
+            passed &= check(
+                "deterministic/approach_efficiency",
+                d["approach_efficiency"],
+                config.skills.p2_gates.approach_efficiency,
+            )
+        else:
+            passed &= check(
+                "deterministic/coverage", d["coverage"], config.skills.p2_gates.coverage
+            )
+            passed &= check(
+                "deterministic/coverage_auc", d["coverage_auc"], config.skills.p2_gates.coverage_auc
+            )
         if not config.skills.wall_mask:
             passed &= check(
                 "deterministic/wall_block",
@@ -241,11 +343,30 @@ def evaluate_skill(model, task, config):
                 float(np.mean(values)) if values else 0.0,
                 0.70 if task == "P3" else 0.75,
             )
+    groups = {}
+    if is_p3:
+        p3_passed, groups = add_p3_gates(task, rows, summary, check, config)
+        passed &= p3_passed
     return {
+        "split": split,
+        "groups": groups,
         "task": task,
         "validation_scope": "current_phase_only",
+        "gate_status": "pilot_thresholds"
+        if task in ("P2b", "P2c", "P3a", "P3b", "P3c")
+        else "configured",
+        "approach_reference": "evaluator-only geodesic distance at first sighting; failures zero",
         "efficiency_reference": "full-map shortest path from spawn; POI location is oracle",
-        "discovery_metrics": "first POI; discovery action included in before_seen coverage",
+        "discovery_metrics": (
+            "v2: P3 activated_if_seen pooled over all seen POIs; other timing metrics first POI"
+            if is_p3
+            else "first POI; discovery action included in before_seen coverage"
+        ),
+        "coverage_definition": (
+            "minimum per-room coverage and its time average for P3b/P3c; aggregate tile coverage for P3a"
+            if task in ("P3a", "P3b", "P3c")
+            else "aggregate tile coverage"
+        ),
         "passed": bool(passed),
         "checks": checks,
         "failed_checks": [c["name"] for c in checks if not c["passed"]],

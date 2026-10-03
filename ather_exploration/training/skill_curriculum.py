@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass, field
 
-STAGES = ("P1a", "P1b", "P2a", "P2b", "P3", "P4a", "P4b", "P5a", "P5b")
-CAPS = (250000, 250000, 262144, 262144, 524288, 1048576, 1048576)
-MINIMUM = (32768, 32768, 32768, 32768, 65536, 65536, 65536)
+STAGES = ("P1a", "P1b", "P2a", "P2b", "P2c", "P3a", "P3b", "P3c", "P4a", "P4b", "P5a", "P5b")
+CAPS = (163840, 163840, 262144, 262144, 262144, 524288, 524288, 524288, 1048576, 1048576)
+MINIMUM = (32768, 32768, 32768, 32768, 32768, 65536, 65536, 65536, 65536, 65536)
 
 
 @dataclass
@@ -17,6 +17,41 @@ class SkillController:
     eval_steps: int = 0
     history: list = field(default_factory=list)
     best: dict = field(default_factory=dict)
+    restart_level: int = 0
+    restart_results: list = field(default_factory=list)
+    p2_task_budget: int = 262144
+    best_by_task: dict = field(default_factory=dict)
+    p3_minimum: int = 65536
+    p3_task_budget: int = 524288
+    recovery_p3b_budget: int | None = None
+
+    def observe_restart(self, level, progress, window, rate):
+        """Public novelty mastery; separate from validation gate and task promotion."""
+        if level != self.restart_level:
+            return False
+        self.restart_results.append(bool(progress))
+        del self.restart_results[:-window]
+        if (
+            len(self.restart_results) == window
+            and sum(self.restart_results) / window >= rate
+            and self.restart_level < 2
+        ):
+            self.restart_level += 1
+            self.restart_results.clear()
+            return True
+        return False
+
+    @property
+    def minimum(self):
+        return self.p3_minimum if self.task.startswith("P3") else MINIMUM[self.index]
+
+    @property
+    def budget(self):
+        if self.task == "P3b" and self.recovery_p3b_budget is not None:
+            return self.recovery_p3b_budget
+        if self.task.startswith("P3"):
+            return self.p3_task_budget
+        return self.p2_task_budget if self.task.startswith("P2") else CAPS[self.index]
 
     @property
     def task(self):
@@ -27,20 +62,37 @@ class SkillController:
         return self.index
 
     def observe(self, passed, steps):
-        if self.index >= 7:
+        if self.task.startswith("P5"):
             return False
         elapsed = steps - self.phase_start
-        self.passed = self.passed + 1 if passed and elapsed >= MINIMUM[self.index] else 0
-        self.history.append({"task": self.task, "steps": steps, "passed": bool(passed)})
-        if self.passed >= 2:
+        self.passed = self.passed + 1 if passed else 0
+        self.history.append(
+            {
+                "task": self.task,
+                "steps": steps,
+                "passed": bool(passed),
+                "elapsed": elapsed,
+                "minimum": self.minimum,
+                "eligible": elapsed >= self.minimum,
+                "streak": self.passed,
+            }
+        )
+        if self.passed >= 2 and elapsed >= self.minimum:
             old = self.task[:2]
             self.index += 1
             self.phase_start = steps
             if self.task[:2] != old:
                 self.family_start = steps
+            if old == "P3" and self.task == "P3c":
+                # P3c owns a fresh prefix bank and starts from the easy restart band.
+                self.restart_level = 0
+                self.restart_results.clear()
             self.passed = 0
             return True
-        self.failed = steps - self.family_start >= CAPS[self.index]
+        budget = self.budget
+        self.failed = (
+            elapsed if self.task.startswith(("P2", "P3")) else steps - self.family_start
+        ) >= budget
         return False
 
     def mixture(self):
@@ -48,11 +100,14 @@ class SkillController:
         return {
             "P1a": [("P1a", 1.0)],
             "P1b": [("P1b", 0.75), ("P1a", 0.25)],
-            "P2a": [("P2a", 0.56), ("P2b", 0.24), ("P1b", 0.20)],
-            "P2b": [("P2a", 0.24), ("P2b", 0.56), ("P1b", 0.20)],
-            "P3": [("P3", 0.8), ("P2b", 0.1), ("P1b", 0.1)],
-            "P4a": [("P4a", 0.8), ("P3", 0.15), ("P2b", 0.05)],
-            "P4b": [("P4b", 0.64), ("P4a", 0.16), ("P3", 0.15), ("P2b", 0.05)],
-            "P5a": [("target", 0.8), ("P4b", 0.1), ("P3", 0.1)],
+            "P2a": [("P2a", 0.8), ("P1b", 0.2)],
+            "P2b": [("P2b", 1.0)],
+            "P2c": [("P2c", 1.0)],
+            "P3a": [("P3a", 0.8), ("P2c", 0.2)],
+            "P3b": [("P3b", 0.8), ("P3a", 0.2)],
+            "P3c": [("P3c", 0.8), ("P3b", 0.2)],
+            "P4a": [("P4a", 0.8), ("P3c", 0.15), ("P2b", 0.05)],
+            "P4b": [("P4b", 0.64), ("P4a", 0.16), ("P3c", 0.15), ("P2b", 0.05)],
+            "P5a": [("target", 0.8), ("P4b", 0.1), ("P3c", 0.1)],
             "P5b": [("target", 1.0)],
         }[self.task]

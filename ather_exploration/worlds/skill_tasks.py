@@ -13,8 +13,11 @@ from ather_exploration.types import Scenario, ValidatorStatus
 from ather_exploration.worlds.topology import distances
 from ather_exploration.worlds.validation import validate_scenario
 
-TASKS = ("P1a", "P1b", "P2a", "P2b", "P3", "P4a", "P4b")
-HORIZONS = dict(zip(TASKS, (32, 32, 96, 96, 256, 128, 256), strict=True))
+TASKS = ("P1a", "P1b", "P2a", "P2b", "P2c", "P3", "P4a", "P4b")
+P3_TASKS = ("P3a", "P3b", "P3c")
+HORIZONS = dict(zip(TASKS, (32, 32, 96, 96, 192, 256, 128, 256), strict=True))
+HORIZONS.update(dict.fromkeys(P3_TASKS, 256))
+TASKS += P3_TASKS
 # Easy geometry in P5a uses a small-target budget. Actual target banks retain their H.
 PHASE_HORIZONS = {**HORIZONS, "P5a": 256, "P5b": 256}
 EARLY_SUCCESS_PHASES = frozenset(("P1a", "P1b", "P2a", "P2b", "P4a"))
@@ -39,6 +42,10 @@ def wall_mask(observation):
 def skill_scenario(task, seed):
     if task not in TASKS or type(seed) is not int or seed < 0:
         raise ValueError("Invalid skill task/seed")
+    if task in P3_TASKS:
+        from ather_exploration.worlds.p3_tasks import p3_scenario
+
+        return p3_scenario(task, seed)
     rng = np.random.default_rng(seed)
     if task == "P4a":
         n = int(rng.choice((9, 11, 13)))
@@ -170,12 +177,28 @@ def skill_scenario(task, seed):
 
 
 class SkillEnv(gym.Wrapper):
-    def __init__(self, task, seed, reward=None, first_visit=False, step_cost=0.0, *, phase=None):
+    def __init__(
+        self,
+        task,
+        seed,
+        reward=None,
+        first_visit=False,
+        step_cost=0.0,
+        *,
+        phase=None,
+        wall_penalty=0.0,
+        horizon=None,
+        visit_bonus=0.002,
+        visit_cap=0.10,
+        room_exploration=0.0,
+    ):
         self.task, self.task_seed = task, seed
         self.phase = phase or task
         if self.phase not in PHASE_HORIZONS:
             raise ValueError(f"Unknown curriculum phase: {self.phase}")
-        scenario = replace(skill_scenario(task, seed), horizon=PHASE_HORIZONS[self.phase])
+        scenario = replace(
+            skill_scenario(task, seed), horizon=horizon or PHASE_HORIZONS[self.phase]
+        )
         cfg = ObservationConfig()
         super().__init__(
             PublicMemoryWrapper(
@@ -187,7 +210,10 @@ class SkillEnv(gym.Wrapper):
             )
         )
         self.first_visit = first_visit
+        self.visit_bonus, self.visit_cap = visit_bonus, visit_cap
+        self.room_exploration = room_exploration
         self.step_cost = step_cost
+        self.wall_penalty = wall_penalty
         self.finished = False
 
     def reset(self, *, seed=None, options=None):
@@ -195,10 +221,28 @@ class SkillEnv(gym.Wrapper):
         obs, info = self.env.reset(seed=seed, options=options)
         self.position = (0, 0)
         self.visited = {self.position}
-        self.remaining_bonus = 0.10
+        self.remaining_bonus = self.visit_cap
         self.finished = False
         self.last_obs = obs
+        self.poi_seen = bool(obs["memory"][3:5].any())
+        self.room_potential = self._room_potential(obs)
         return obs, info
+
+    def _room_potential(self, observation):
+        if (
+            self.phase not in ("P3b", "P3c")
+            or self.room_exploration <= 0
+            or not self.unwrapped.scenario.room_labels
+        ):
+            return 0.0
+        from ather_exploration.worlds.p3_tasks import (
+            room_coverage_fractions,
+            room_exploration_potential,
+        )
+
+        return room_exploration_potential(
+            room_coverage_fractions(self.unwrapped.scenario, observation["memory"])
+        )
 
     def action_masks(self):
         return wall_mask(self.last_obs)
@@ -211,12 +255,25 @@ class SkillEnv(gym.Wrapper):
         e = info["transition"]
         self.position = tuple(a + b for a, b in zip(self.position, e["actual_delta"], strict=True))
         bonus = 0.0
+        room_bonus = 0.0
         if any(e["actual_delta"]) and self.position not in self.visited:
             if self.first_visit:
-                bonus = min(0.002, self.remaining_bonus)
+                bonus = min(self.visit_bonus, self.remaining_bonus)
                 self.remaining_bonus -= bonus
             self.visited.add(self.position)
         core = self.unwrapped
+        # Reward the discovery transition, then latch search completion for the episode.
+        if self.phase == "P2b" and self.poi_seen:
+            reward -= core.reward_config.area * e["new_floor"]
+            area_reward = 0.0
+        else:
+            area_reward = core.reward_config.area * e["new_floor"]
+        self.poi_seen = self.poi_seen or bool(obs["memory"][3:5].any())
+        next_room_potential = self._room_potential(obs)
+        if self.room_exploration > 0:
+            room_bonus = self.room_exploration * max(0.0, next_room_potential - self.room_potential)
+        self.room_potential = next_room_potential
+        wall_cost = self.wall_penalty * bool(obs["state"][6])
         snap = core.evaluator_snapshot()
         all_pois = len(snap.activated_pois) == len(core.scenario.pois)
         alive = not e["died"]
@@ -237,24 +294,32 @@ class SkillEnv(gym.Wrapper):
                 "intrinsic_reward": bonus,
                 "task_reward": reward,
                 "reward_components": {
-                    "area": core.reward_config.area * e["new_floor"],
+                    "area": area_reward,
                     "discovery": core.reward_config.discovery * e["new_poi"],
                     "activation": core.reward_config.activation * e["activated"],
                     "death": -core.reward_config.death * e["died"],
                     "intrinsic": bonus,
+                    "room_exploration": room_bonus,
                     "step_cost": -self.step_cost,
+                    "wall_penalty": -wall_cost,
                 },
                 "early_success": early,
             },
         }
-        return obs, reward + bonus - self.step_cost, bool(terminated or early), truncated, info
+        return (
+            obs,
+            reward + bonus + room_bonus - self.step_cost - wall_cost,
+            bool(terminated or early),
+            truncated,
+            info,
+        )
 
 
 def make_skill_env(task, seed, reward=None, first_visit=False, step_cost=0.0, *, phase=None):
     return SkillEnv(task, seed, reward, first_visit, step_cost, phase=phase)
 
 
-def configured_skill_env(task, seed, skills, *, phase=None):
+def _configured_skill_env(task, seed, skills, *, phase=None):
     """Sample geometry by task; apply the active phase objective in every caller.
 
     Phase is environment configuration only, never a policy observation.
@@ -267,12 +332,41 @@ def configured_skill_env(task, seed, skills, *, phase=None):
             area=p1.area, discovery=p1.discovery, activation=p1.activation, death=skills.death
         )
         return make_skill_env(task, seed, reward, False, p1.step_cost, phase=phase)
-    if phase in ("P2a", "P2b"):
+    if phase in ("P2a", "P2b", "P2c"):
         p2 = skills.p2_reward
         reward = RewardConfig(
-            area=p2.area, discovery=p2.discovery, activation=p2.activation, death=skills.death
+            area=0.0 if phase == "P2a" else p2.area,
+            discovery=0.0 if phase == "P2a" else p2.discovery,
+            activation=p2.activation,
+            death=skills.death,
         )
-        return make_skill_env(task, seed, reward, skills.first_visit, p2.step_cost, phase=phase)
+        return SkillEnv(
+            task,
+            seed,
+            reward,
+            False,
+            p2.step_cost,
+            phase=phase,
+            wall_penalty=p2.wall_penalty,
+            horizon=skills.p2c_horizon if phase == "P2c" else None,
+        )
+    if phase in P3_TASKS:
+        p3 = skills.p3_reward
+        return SkillEnv(
+            task,
+            seed,
+            RewardConfig(
+                area=p3.area, discovery=p3.discovery, activation=p3.activation, death=skills.death
+            ),
+            skills.p3_visit_bonus > 0,
+            0.0,
+            visit_bonus=skills.p3_visit_bonus,
+            visit_cap=skills.p3_visit_cap,
+            phase=phase,
+            wall_penalty=p3.wall_penalty,
+            horizon=skills.p3_horizon,
+            room_exploration=p3.room_exploration,
+        )
     return make_skill_env(task, seed, reward, skills.first_visit, phase=phase)
 
 
@@ -283,6 +377,10 @@ def skill_pool(task, count, validation=False):
 
     from ather_exploration.worlds.scenarios import digest
 
+    if task in P3_TASKS:
+        from ather_exploration.worlds.p3_tasks import p3_pool
+
+        return p3_pool(task, count, "validation" if validation else "train")
     records = []
     seen = set()
     start = 100000 if validation else 0
@@ -291,6 +389,10 @@ def skill_pool(task, count, validation=False):
         payload = asdict(scenario)
         payload.pop("seed")
         payload.pop("skill_task")
+        # P2b/c share geometry: changing the episode horizon must not move a map
+        # across the content split when transferring from search to exploration.
+        if task == "P2c":
+            payload["horizon"] = HORIZONS["P2b"]
         identity = digest(payload)
         if (int(identity[:8], 16) % 5 == 0) != validation or identity in seen:
             continue
@@ -311,7 +413,7 @@ def build_skill_suite(config, output):
     manifest = {
         "state": "BUILDING",
         "source_revision": implementation_id(),
-        "version": 2,
+        "version": 4,
         "tasks": {},
     }
     write_record(root / "manifest.json", manifest)
@@ -330,3 +432,12 @@ def build_skill_suite(config, output):
         write_record(root / "manifest.json", manifest, replace=True)
         raise
     return manifest
+
+
+def configured_skill_env(task, seed, skills, *, phase=None):
+    env = _configured_skill_env(task, seed, skills, phase=phase)
+    if skills.frontier:
+        from ather_exploration.environment.frontier import FrontierObservation
+
+        env = FrontierObservation(env)
+    return env

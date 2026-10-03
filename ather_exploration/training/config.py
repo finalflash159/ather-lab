@@ -34,8 +34,38 @@ class P1RewardConfig(FrozenConfig):
 
 
 class P2RewardConfig(P1RewardConfig):
+    wall_penalty: float = Field(default=0.02, ge=0, allow_inf_nan=False)
     area: float = Field(default=0.01, ge=0, allow_inf_nan=False)
     discovery: float = Field(default=0.05, ge=0, allow_inf_nan=False)
+
+
+class P2GateConfig(FrozenConfig):
+    # Pilot thresholds: calibrate before formal comparisons.
+    approach_efficiency: float = Field(default=0.60, ge=0, le=1)
+    discovery_success: float = Field(default=0.95, ge=0, le=1)
+    coverage: float = Field(default=0.75, ge=0, le=1)
+    coverage_auc: float = Field(default=0.50, ge=0, le=1)
+
+
+class P3RewardConfig(FrozenConfig):
+    area: float = Field(default=0.01, ge=0, allow_inf_nan=False)
+    discovery: float = Field(default=0.05, ge=0, allow_inf_nan=False)
+    activation: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    wall_penalty: float = Field(default=0.02, ge=0, allow_inf_nan=False)
+    room_exploration: float = Field(default=0.0, ge=0, le=2.0, allow_inf_nan=False)
+
+
+class P3GateConfig(FrozenConfig):
+    # Explicit pilot thresholds; report joint outcomes and every map stratum.
+    success: float = Field(default=0.80, ge=0, le=1)
+    stochastic_success: float = Field(default=0.75, ge=0, le=1)
+    coverage: float = Field(default=0.75, ge=0, le=1)
+    coverage_auc: float = Field(default=0.50, ge=0, le=1)
+    room_coverage: float = Field(default=0.50, ge=0, le=1)
+    room_coverage_auc: float = Field(default=0.50, ge=0, le=1)
+    joint_success: float = Field(default=0.70, ge=0, le=1)
+    subgroup_success: float = Field(default=0.60, ge=0, le=1)
+    wall_block: float = Field(default=0.10, ge=0, le=1)
 
 
 class SkillConfig(BaseModel):
@@ -47,10 +77,66 @@ class SkillConfig(BaseModel):
     eval_interval: int = Field(default=16384, gt=0)
     activation: float = Field(default=0.5, gt=0, allow_inf_nan=False)
     death: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    frontier: bool = False
+    p3_visit_bonus: float = Field(default=0.0, ge=0, le=0.01, allow_inf_nan=False)
+    p3_visit_cap: float = Field(default=0.1, gt=0, le=0.5, allow_inf_nan=False)
     first_visit: bool = False
     wall_mask: bool = False
     p1_reward: P1RewardConfig = Field(default_factory=P1RewardConfig)
     p2_reward: P2RewardConfig = Field(default_factory=P2RewardConfig)
+    p2_gates: P2GateConfig = Field(default_factory=P2GateConfig)
+    p2c_horizon: int = Field(default=192, ge=32, le=1024)
+    p2_task_budget: int = Field(default=262144, ge=32768)
+    p3_reward: P3RewardConfig = Field(default_factory=P3RewardConfig)
+    p3_gates: P3GateConfig = Field(default_factory=P3GateConfig)
+    p3_horizon: int = Field(default=256, ge=192, le=1024)
+    p3_minimum: int = Field(default=65536, ge=32768)
+    p3_task_budget: int = Field(default=524288, ge=65536)
+
+
+class LearningRateTrial(FrozenConfig):
+    parent_steps: int = Field(default=655360, gt=0)
+    additional_steps: int = Field(default=65536, gt=0)
+    task: Literal["P3a"] = "P3a"
+
+
+class UnfinishedTrial(FrozenConfig):
+    """Fixed-task controlled branch; additional steps exclude prefix reconstruction."""
+
+    parent_steps: int = Field(default=1212416, gt=0)
+    additional_steps: int = Field(default=65536, gt=0)
+    restart_probability: float = Field(default=0.25, ge=0, le=0.5)
+    pool_per_band: int = Field(default=16, ge=1, le=64)
+    minimum_remaining: int = Field(default=64, ge=32)
+    mastery_episodes: int = Field(default=8, ge=4)
+    mastery_rate: float = Field(default=0.75, gt=0, le=1)
+
+
+class P3ResumeConfig(FrozenConfig):
+    """Audited P3a-boundary continuation with P3b/P3c room-completion replay."""
+
+    parent_steps: int = Field(default=737280, gt=0)
+    restart_probability: float = Field(default=0.25, ge=0, le=0.5)
+    pool_per_band: int = Field(default=16, ge=1, le=64)
+    minimum_remaining: int = Field(default=64, ge=32)
+    mastery_episodes: int = Field(default=8, ge=4)
+    mastery_rate: float = Field(default=0.75, gt=0, le=1)
+
+
+class RecoveryConfig(FrozenConfig):
+    """Public-route supervision and stagnation replay; no inference helper."""
+
+    parent_steps: int = 1048576
+    additional_steps: int = Field(default=131072, ge=65536)
+    route_coefficient: float = Field(default=0.02, ge=0, le=0.1, allow_inf_nan=False)
+    label_limit: int = Field(default=256, ge=1, le=1024)
+    label_after: int = Field(default=8, ge=1)
+    stagnation_steps: int = Field(default=16, ge=8)
+    lookback: int = Field(default=8, ge=1)
+    minimum_remaining: int = Field(default=64, ge=64)
+    restart_probability: float = Field(default=0.25, ge=0, le=0.5)
+    pool_per_kind: int = Field(default=24, ge=1, le=128)
+    probe_count: int = Field(default=64, ge=1, le=256)
 
 
 class TrainingConfig(FrozenConfig):
@@ -70,6 +156,11 @@ class TrainingConfig(FrozenConfig):
         return self.method in ("ppo_curriculum", "recurrent_ppo_curriculum")
 
     skills: SkillConfig = Field(default_factory=SkillConfig)
+    p3_restart: bool = False
+    lr_trial: LearningRateTrial | None = None
+    unfinished_trial: UnfinishedTrial | None = None
+    p3_resume: P3ResumeConfig | None = None
+    recovery: RecoveryConfig | None = None
     seed: int = Field(default=0, ge=0, lt=2**32)
     total_timesteps: int = Field(default=4096, gt=0)
     n_envs: int = Field(default=1, gt=0, le=64)
@@ -92,6 +183,106 @@ class TrainingConfig(FrozenConfig):
     @model_validator(mode="after")
     def coherent(self):
         rollout = self.n_envs * self.n_steps
+        if self.recovery:
+            r = self.recovery
+            if (
+                self.p3_resume
+                or self.p3_restart
+                or self.lr_trial
+                or self.unfinished_trial
+                or not self.skills.enabled
+                or not self.skills.frontier
+                or self.skills.stop_after != "P3"
+                or self.method != "ppo"
+                or self.skills.wall_mask
+            ):
+                raise ValueError(
+                    "Recovery requires frontier skill PPO through P3, no other transfer"
+                )
+            if self.learning_rate != self.final_learning_rate:
+                raise ValueError("Recovery requires constant learning rate")
+            if (
+                r.parent_steps != 1048576
+                or r.parent_steps % self.skills.eval_interval
+                or r.additional_steps % self.skills.eval_interval
+                or r.additional_steps < self.skills.p3_minimum
+                or r.parent_steps + r.additional_steps + self.skills.p3_task_budget
+                > self.total_timesteps
+                or self.skills.p3_task_budget % self.skills.eval_interval
+                or r.minimum_remaining >= self.skills.p3_horizon
+                or r.lookback >= r.stagnation_steps
+                or r.probe_count > self.skills.train_count
+            ):
+                raise ValueError("Recovery boundaries, probe count or replay horizon invalid")
+        if self.unfinished_trial:
+            trial = self.unfinished_trial
+            if (
+                self.p3_restart
+                or self.lr_trial
+                or not self.skills.frontier
+                or not self.skills.enabled
+                or self.method != "ppo"
+                or self.skills.wall_mask
+            ):
+                raise ValueError(
+                    "Unfinished trial requires frontier skill PPO without other transfers"
+                )
+            if self.learning_rate != self.final_learning_rate:
+                raise ValueError("Unfinished trial requires constant learning rate")
+            if (
+                trial.parent_steps % self.skills.eval_interval
+                or trial.additional_steps % self.skills.eval_interval
+                or trial.parent_steps + trial.additional_steps > self.total_timesteps
+            ):
+                raise ValueError("Unfinished trial boundaries must align with evaluation/budget")
+            if trial.minimum_remaining >= self.skills.p3_horizon:
+                raise ValueError("Restart must leave a nonempty prefix")
+
+        if self.p3_resume:
+            resume = self.p3_resume
+            if (
+                self.p3_restart
+                or self.lr_trial
+                or self.unfinished_trial
+                or not self.skills.frontier
+                or not self.skills.enabled
+                or self.skills.stop_after != "P3"
+                or self.method != "ppo"
+                or self.skills.wall_mask
+            ):
+                raise ValueError(
+                    "P3 resume requires frontier PPO through P3 without other transfer modes"
+                )
+            if resume.parent_steps % self.skills.eval_interval:
+                raise ValueError("P3 resume checkpoint must align with evaluation interval")
+            if resume.parent_steps >= self.total_timesteps:
+                raise ValueError("P3 resume parent must be below total_timesteps")
+            if resume.minimum_remaining >= self.skills.p3_horizon:
+                raise ValueError("P3 replay must leave a nonempty episode suffix")
+
+        if self.skills.frontier and (not self.skills.enabled or self.skills.stop_after != "P3"):
+            raise ValueError("Frontier currently supported for the P3 training family")
+        if self.p3_restart and (
+            self.lr_trial
+            or not self.skills.frontier
+            or self.method != "ppo"
+            or self.skills.wall_mask
+        ):
+            raise ValueError("P3 restart requires unmasked frontier PPO and no LR trial")
+        if self.lr_trial:
+            if not self.skills.enabled or self.method != "ppo" or self.skills.wall_mask:
+                raise ValueError("LR trial requires unmasked skill PPO")
+            if self.learning_rate != self.final_learning_rate:
+                raise ValueError("LR trial uses an explicit constant learning rate")
+            if (
+                self.lr_trial.additional_steps % self.skills.eval_interval
+                or self.lr_trial.parent_steps % self.skills.eval_interval
+            ):
+                raise ValueError("LR trial boundaries must align with evaluation intervals")
+            if self.lr_trial.parent_steps + self.lr_trial.additional_steps > self.total_timesteps:
+                raise ValueError("LR trial exceeds total budget")
+        if self.skills.p3_minimum > self.skills.p3_task_budget:
+            raise ValueError("P3 minimum exceeds task budget")
         if self.skills.enabled:
             if self.method != "ppo":
                 raise ValueError("Skill curriculum currently supports feedforward ppo only")

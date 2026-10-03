@@ -31,9 +31,11 @@ class FrozenConfig(BaseModel):
         # Pydantic Literal[1] compares equal to True/1.0 even under strict=True.
         if isinstance(values, dict):
             for name, value in values.items():
-                if isinstance(value, bool):
+                if isinstance(value, bool) and not (
+                    name in cls.model_fields and cls.model_fields[name].annotation is bool
+                ):
                     # Pydantic validators require ValueError to wrap ValidationError.
-                    raise ValueError(f"Boolean is not a valid numeric/config value: {name}")  # noqa: TRY004
+                    raise ValueError(f"Boolean is not a valid numeric/config value: {name}")
                 if (
                     name
                     in {

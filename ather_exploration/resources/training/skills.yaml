@@ -29,11 +29,20 @@ skills:
     discovery: 0.0
     activation: 0.5
     step_cost: 0.01
+  # Pilot defaults; P2a suppresses area/discovery; P2b suppresses area after sighting.
+  p2c_horizon: 192
+  p2_task_budget: 262144
+  p2_gates:
+    discovery_success: 0.95
+    approach_efficiency: 0.60
+    coverage: 0.75
+    coverage_auc: 0.50
   p2_reward:
     area: 0.01
     discovery: 0.05
     activation: 0.5
     step_cost: 0.005
+    wall_penalty: 0.02
 banks:
   small: ../../../artifacts/banks-skills/small
   medium: ../../../artifacts/banks-skills/medium
