@@ -66,8 +66,10 @@ def fetch(volume, remote, target):
     fd, temporary = tempfile.mkstemp(prefix=".download-", dir=target.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
-            for chunk in volume.read_file(remote):
-                stream.write(chunk)
+            # The SDK file-object path writes blocks at explicit offsets and
+            # verifies block digests. Streaming read_file returned corrupt bytes
+            # for a real large checkpoint despite reporting the correct size.
+            volume.read_file_into_fileobj(remote, stream)
         os.replace(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -112,7 +114,10 @@ def download_run(volume, run_id, output):
                 candidate = staging / "checkpoint"
                 for name in sorted(FILES | {"checksums.json", "READY"}):
                     fetch(volume, f"{remote_root}/{relative}/{name}", candidate / name)
-                inspect_checkpoint(candidate, inference=True)
+                try:
+                    inspect_checkpoint(candidate, inference=True)
+                except ValueError as exc:
+                    raise ValueError(f"{run_id}/{relative}: {exc}") from exc
                 destination.parent.mkdir(exist_ok=True)
                 candidate.rename(destination)
             else:

@@ -1,5 +1,3 @@
-"""Transport checks with an in-memory Volume; never execute learning or remote jobs."""
-
 import hashlib
 import json
 from types import SimpleNamespace
@@ -15,8 +13,8 @@ class FakeVolume:
     def __init__(self, root):
         self.root = root
 
-    def read_file(self, path):
-        yield (self.root / path.lstrip("/")).read_bytes()
+    def read_file_into_fileobj(self, path, stream):
+        return stream.write((self.root / path.lstrip("/")).read_bytes())
 
     def iterdir(self, path):
         return [
@@ -80,8 +78,8 @@ def test_remote_pointer_cannot_escape(tmp_path):
 
 def test_failed_download_preserves_existing_file(tmp_path):
     class Broken:
-        def read_file(self, path):
-            yield b"partial"
+        def read_file_into_fileobj(self, path, stream):
+            stream.write(b"partial")
             raise ConnectionError("network")
 
     target = tmp_path / "file"
@@ -151,3 +149,35 @@ def test_download_recovers_after_corrupt_older_checkpoint(tmp_path):
     assert not (output / "latest.json").exists()
     (first / "model.zip").write_bytes(original)
     assert download_run(FakeVolume(tmp_path / "remote"), "test", output)["checkpoints"] == 2
+
+
+def test_fetch_uses_offset_writer_not_stream_iterator(tmp_path):
+    class Volume:
+        def read_file(self, path):
+            raise AssertionError("Corrupt streaming API must not be used")
+
+        def read_file_into_fileobj(self, path, stream):
+            stream.seek(3)
+            stream.write(b"def")
+            stream.seek(0)
+            stream.write(b"abc")
+            return 6
+
+    target = tmp_path / "model.zip"
+    fetch(Volume(), "/checkpoint/model.zip", target)
+    assert target.read_bytes() == b"abcdef"
+
+
+def test_transport_only_revision_allows_inference_not_resume(tmp_path):
+    from ather_exploration.training.checkpoints import inspect_checkpoint
+
+    _, cp = remote_run(tmp_path)
+    metadata = json.loads((cp / "metadata.json").read_text())
+    metadata["source_revision"] = "17e3e864172cc7cd52e2a70cc6b293258192b0f39b9d748aa643e4de790797c8"
+    (cp / "metadata.json").write_text(json.dumps(metadata))
+    hashes = json.loads((cp / "checksums.json").read_text())
+    hashes["metadata.json"] = hashlib.sha256((cp / "metadata.json").read_bytes()).hexdigest()
+    (cp / "checksums.json").write_text(json.dumps(hashes))
+    inspect_checkpoint(cp, inference=True)
+    with pytest.raises(ValueError, match="source revision"):
+        inspect_checkpoint(cp)
