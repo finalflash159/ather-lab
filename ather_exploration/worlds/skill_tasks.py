@@ -19,7 +19,7 @@ HORIZONS = dict(zip(TASKS, (32, 32, 96, 96, 192, 256, 128, 256), strict=True))
 HORIZONS.update(dict.fromkeys(P3_TASKS, 256))
 TASKS += P3_TASKS
 # Easy geometry in P5a uses a small-target budget. Actual target banks retain their H.
-PHASE_HORIZONS = {**HORIZONS, "P5a": 256, "P5b": 256}
+PHASE_HORIZONS = {**HORIZONS, "P5a": 256, "P5b": 256, "P4c": 256}
 EARLY_SUCCESS_PHASES = frozenset(("P1a", "P1b", "P2a", "P2b", "P4a"))
 
 
@@ -191,13 +191,16 @@ class SkillEnv(gym.Wrapper):
         visit_bonus=0.002,
         visit_cap=0.10,
         room_exploration=0.0,
+        scenario_override=None,
+        all_pois_required=False,
     ):
         self.task, self.task_seed = task, seed
         self.phase = phase or task
         if self.phase not in PHASE_HORIZONS:
             raise ValueError(f"Unknown curriculum phase: {self.phase}")
         scenario = replace(
-            skill_scenario(task, seed), horizon=horizon or PHASE_HORIZONS[self.phase]
+            scenario_override or skill_scenario(task, seed),
+            horizon=horizon or PHASE_HORIZONS[self.phase],
         )
         cfg = ObservationConfig()
         super().__init__(
@@ -209,6 +212,7 @@ class SkillEnv(gym.Wrapper):
                 scenario.horizon,
             )
         )
+        self.all_pois_required = all_pois_required
         self.first_visit = first_visit
         self.visit_bonus, self.visit_cap = visit_bonus, visit_cap
         self.room_exploration = room_exploration
@@ -230,7 +234,7 @@ class SkillEnv(gym.Wrapper):
 
     def _room_potential(self, observation):
         if (
-            self.phase not in ("P3b", "P3c")
+            self.phase not in ("P3b", "P3c", "P4b", "P4c")
             or self.room_exploration <= 0
             or not self.unwrapped.scenario.room_labels
         ):
@@ -277,7 +281,11 @@ class SkillEnv(gym.Wrapper):
         snap = core.evaluator_snapshot()
         all_pois = len(snap.activated_pois) == len(core.scenario.pois)
         alive = not e["died"]
-        completed_pois = bool(snap.activated_pois) if self.phase == "P4b" else all_pois
+        completed_pois = (
+            bool(snap.activated_pois)
+            if self.phase == "P4b" and not self.all_pois_required
+            else all_pois
+        )
         early_phase = self.phase in EARLY_SUCCESS_PHASES
         success = (
             completed_pois and alive and (early_phase or snap.step_count == core.scenario.horizon)
@@ -325,6 +333,28 @@ def _configured_skill_env(task, seed, skills, *, phase=None):
     Phase is environment configuration only, never a policy observation.
     """
     phase = phase or task
+    if skills.p4.enabled and task.startswith("P4"):
+        from ather_exploration.worlds.p4_tasks import p4_scenario
+
+        p3 = skills.p3_reward
+        return SkillEnv(
+            task,
+            seed,
+            RewardConfig(
+                area=0.0 if phase == "P4a" else p3.area,
+                discovery=0.0 if phase == "P4a" else p3.discovery,
+                activation=p3.activation,
+                death=skills.death,
+            ),
+            phase=phase,
+            wall_penalty=p3.wall_penalty,
+            room_exploration=0.0 if phase == "P4a" else p3.room_exploration,
+            first_visit=phase != "P4a" and skills.p3_visit_bonus > 0,
+            visit_bonus=skills.p3_visit_bonus,
+            visit_cap=skills.p3_visit_cap,
+            scenario_override=p4_scenario(task, seed),
+            all_pois_required=True,
+        )
     reward = RewardConfig(activation=skills.activation, death=skills.death)
     if phase in ("P1a", "P1b"):
         p1 = skills.p1_reward
@@ -371,10 +401,14 @@ def _configured_skill_env(task, seed, skills, *, phase=None):
 
 
 @lru_cache(maxsize=64)
-def skill_pool(task, count, validation=False):
+def skill_pool(task, count, validation=False, p4=False):
     """Unique configurations with content-hash splitting, not merely different RNG seeds."""
     from dataclasses import asdict
 
+    if p4 and task.startswith("P4"):
+        from ather_exploration.worlds.p4_tasks import p4_pool
+
+        return p4_pool(task, count, validation)
     from ather_exploration.worlds.scenarios import digest
 
     if task in P3_TASKS:
@@ -413,17 +447,34 @@ def build_skill_suite(config, output):
     manifest = {
         "state": "BUILDING",
         "source_revision": implementation_id(),
-        "version": 4,
+        "version": 5 if config.skills.p4.enabled else 4,
         "tasks": {},
     }
     write_record(root / "manifest.json", manifest)
     try:
-        for task in TASKS:
-            train = skill_pool(task, config.skills.train_count)
-            val = skill_pool(task, config.skills.validation_count, True)
+        for task in (*TASKS, *(("P4c",) if config.skills.p4.enabled else ())):
+            train = skill_pool(task, config.skills.train_count, p4=config.skills.p4.enabled)
+            val = skill_pool(
+                task, config.skills.validation_count, True, p4=config.skills.p4.enabled
+            )
             if {x[1] for x in train} & {x[1] for x in val}:
                 raise ValueError("Skill split overlap")
             manifest["tasks"][task] = {"train": train, "validation": val}
+            if config.skills.p4.enabled and task.startswith("P4"):
+                from dataclasses import asdict
+
+                from ather_exploration.worlds.p4_tasks import p4_scenario
+
+                for split, rows in (("train", train), ("validation", val)):
+                    for seed, identity in rows:
+                        write_record(
+                            root / task / split / f"{seed}.json",
+                            {
+                                "identity": identity,
+                                "scenario": asdict(p4_scenario(task, seed)),
+                                "source_revision": manifest["source_revision"],
+                            },
+                        )
             print(f"[skills-bank] {task}: train={len(train)} validation={len(val)}", flush=True)
         manifest["state"] = "READY"
         write_record(root / "manifest.json", manifest, replace=True)
@@ -440,4 +491,8 @@ def configured_skill_env(task, seed, skills, *, phase=None):
         from ather_exploration.environment.frontier import FrontierObservation
 
         env = FrontierObservation(env)
+    if skills.p4.enabled:
+        from ather_exploration.environment.threat_history import ThreatHistory
+
+        env = ThreatHistory(env)
     return env

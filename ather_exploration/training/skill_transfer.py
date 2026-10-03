@@ -7,6 +7,7 @@ from stable_baselines3 import PPO
 
 from ather_exploration.agents.learning import build_model, schema_signature
 from ather_exploration.training.checkpoints import _hash, inspect_checkpoint, restore_rng
+from ather_exploration.training.config import P4Config
 from ather_exploration.training.skill_environments import skill_identity
 from ather_exploration.worlds.scenarios import implementation_id
 
@@ -16,10 +17,16 @@ def _prepare_transfer(path, config, env, *, source_phase):
     _p3 = source_phase == "P2"
     parent, meta = inspect_checkpoint(path, transfer_p1_to_p2=not _p3, transfer_p2_to_p3=_p3)
     old, new = meta["config"], config.model_dump(mode="json")
-    old = {"lr_trial": None, "p3_restart": False, **old}
+    old = {"lr_trial": None, "p3_restart": False, "p4_transfer": False, **old}
     old = {
         **old,
-        "skills": {"frontier": False, "p3_visit_bonus": 0.0, "p3_visit_cap": 0.1, **old["skills"]},
+        "skills": {
+            "p4": P4Config().model_dump(mode="json"),
+            "frontier": False,
+            "p3_visit_bonus": 0.0,
+            "p3_visit_cap": 0.1,
+            **old["skills"],
+        },
     }
     if not config.skills.enabled or config.skills.stop_after != ("P3" if _p3 else "P2"):
         raise ValueError("Transfer destination must be P2 for a P1 parent, or P3 for a P2 parent")

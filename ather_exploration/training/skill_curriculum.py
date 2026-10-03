@@ -65,7 +65,8 @@ class SkillController:
 
     @property
     def task(self):
-        return STAGES[self.index]
+        stages = (*STAGES[:10], "P4c", *STAGES[10:]) if self.p4_enabled else STAGES
+        return stages[self.index]
 
     @property
     def stage(self):
@@ -101,12 +102,20 @@ class SkillController:
             return True
         budget = self.budget
         self.failed = (
-            elapsed if self.task.startswith(("P2", "P3")) else steps - self.family_start
+            elapsed
+            if self.task.startswith(("P2", "P3")) or self.p4_enabled and self.task.startswith("P4")
+            else steps - self.family_start
         ) >= budget
         return False
 
     def mixture(self):
         """Geometry sources only; all episodes use the active phase rules."""
+        if self.p4_enabled and self.task.startswith("P4"):
+            return {
+                "P4a": [("P4a", 0.8), ("P3c", 0.2)],
+                "P4b": [("P4b", 0.7), ("P4a", 0.1), ("P3c", 0.2)],
+                "P4c": [("P4c", 0.7), ("P4b", 0.1), ("P3c", 0.2)],
+            }[self.task]
         return {
             "P1a": [("P1a", 1.0)],
             "P1b": [("P1b", 0.75), ("P1a", 0.25)],

@@ -29,7 +29,7 @@ class ExplorationDiagnostics:
             if p in activated and self.activated[p] is None:
                 self.activated[p] = step
         self.tile_coverage = float(memory[2].sum()) / self.floors
-        if self.scenario.skill_task in ("P3b", "P3c") and self.scenario.room_labels:
+        if self.scenario.skill_task in ("P3b", "P3c", "P4b", "P4c") and self.scenario.room_labels:
             from ather_exploration.worlds.p3_tasks import room_coverage_fractions
 
             self.room_coverages = room_coverage_fractions(self.scenario, memory)

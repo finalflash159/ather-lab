@@ -184,6 +184,7 @@ def main() -> None:
                     or config.unfinished_trial
                     or config.p3_resume
                     or config.recovery
+                    or config.p4_transfer
                 ):
                     raise ValueError(
                         "train-check --resume requires an explicit skill transfer flag"
@@ -195,6 +196,12 @@ def main() -> None:
                 ):
                     raise ValueError("LR trial check requires only --resume")
                 transfer_check = {}
+                if config.p4_transfer:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("P4 uses only --resume")
+                    from ather_exploration.training.p4_transfer import check_p4
+
+                    transfer_check = check_p4(args.resume, config)
                 if config.unfinished_trial:
                     if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
                         raise ValueError("Unfinished trial check requires only --resume")

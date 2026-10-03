@@ -3,6 +3,7 @@
 import copy
 
 import gymnasium as gym
+import numpy as np
 
 from ather_exploration.config import ObservationConfig, RewardConfig
 from ather_exploration.schema import observation_space
@@ -20,6 +21,10 @@ class SkillTrainingEnv(gym.Env):
             from ather_exploration.environment.frontier import frontier_space
 
             self.observation_space = frontier_space(self.observation_space)
+        if config.skills.p4.enabled:
+            from ather_exploration.environment.threat_history import threat_space
+
+            self.observation_space = threat_space(self.observation_space)
         self.action_space = gym.spaces.Discrete(5)
         self.rng = stage_rng(config.seed, "skill-worker", worker)
         self.controller = SkillController()
@@ -119,9 +124,9 @@ class SkillTrainingEnv(gym.Env):
             self.env = self.target
             obs, info = self.env.reset()
         else:
-            task_seed = skill_pool(self.task, self.config.skills.train_count)[
-                int(self.rng.integers(self.config.skills.train_count))
-            ][0]
+            task_seed = skill_pool(
+                self.task, self.config.skills.train_count, p4=self.config.skills.p4.enabled
+            )[int(self.rng.integers(self.config.skills.train_count))][0]
             item = None
             if self.archive and self.phase in ("P3b", "P3c"):
                 if self.config.p3_resume or self.config.recovery:
@@ -132,7 +137,12 @@ class SkillTrainingEnv(gym.Env):
                 self.task = item.get("source_task", item.get("task", "P3b"))
             self.task_seed = item["seed"] if item else task_seed
             self.env = configured_skill_env(
-                self.task, self.task_seed, self.config.skills, phase=self.phase
+                self.task,
+                self.task_seed,
+                self.config.skills,
+                phase=(
+                    "P3c" if self.config.skills.p4.enabled and self.task == "P3c" else self.phase
+                ),
             )
             if item:
                 obs, info = self.archive.replay(self.env, item)
@@ -192,7 +202,20 @@ class SkillTrainingEnv(gym.Env):
         )
         before = self.last_obs
         obs, r, term, trunc, info = self.env.step(action)
+        if self.config.p4_transfer:
+            info["teaching_safe_source"] = (
+                self.task == "P3c" and not self.env.unwrapped.scenario.routes
+            )
+            info["teaching_seed"] = self.task_seed
         if self.config.recovery:
+            m = before["memory"]
+            # Public log-scaled visit count > one visit; no hidden map facts.
+            info["route_revisited"] = bool(
+                self.phase in ("P3b", "P3c")
+                and (m[6][m[7] > 0] > np.log1p(1) / np.log1p(1025) + 1e-6).any()
+            )
+            info["route_seed"] = self.task_seed
+            info["route_source_task"] = self.task
             info["route_eligible"] = eligible  # Label is for BEFORE action, never autoreset obs.
             progress = (
                 obs["memory"][2].sum() > before["memory"][2].sum()
@@ -380,7 +403,7 @@ def skill_identity(config):
     return {
         "skills": digest(
             {
-                "version": 4,
+                "version": 5 if config.skills.p4.enabled else 4,
                 "train_count": config.skills.train_count,
                 "validation_count": config.skills.validation_count,
                 "split": "legacy_content_mod5+p3_terrain_dihedral_mod10",

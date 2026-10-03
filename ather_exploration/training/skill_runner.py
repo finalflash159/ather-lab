@@ -26,7 +26,7 @@ from ather_exploration.worlds.scenarios import implementation_id, write_record
 def task_score(result):
     """Gate satisfaction first; quality tie-breaks belong to the current objective."""
     d = result["summary"]["deterministic"]
-    if result["task"].startswith("P3"):
+    if result["task"].startswith("P3") or result["task"] in ("P4b", "P4c"):
         quality = [d["joint_success"], d["success"], d["coverage_auc"]]
     elif result["task"] == "P2c":
         quality = [d["success"], d["coverage_auc"], d["coverage"]]
@@ -50,7 +50,7 @@ def preflight(config):
         from ather_exploration.training.curriculum import WorldBank
 
         ids.update(WorldBank(config.banks).identities)
-    for task in TASKS:
+    for task in (*TASKS, *(("P4c",) if config.skills.p4.enabled else ())):
         env = configured_skill_env(task, 0, config.skills)
         try:
             obs, _ = env.reset()
@@ -80,26 +80,76 @@ class SkillCallback(BaseCallback):
         self.transfer = None
         self.route_seen = set()
         self.route_candidates = 0
+        self.balanced_samples = None
 
     def _on_step(self):
         if not np.isfinite(self.locals["rewards"]).all():
             raise ValueError("Nonfinite rewards")
+        if self.config.p4_transfer:
+            from ather_exploration.training.public_route import public_route
+
+            for i, info in enumerate(self.locals["infos"]):
+                if info.get("teaching_safe_source"):
+                    self.model.route_memory.collection_steps += 1
+                    obs = {key: value[i] for key, value in self.model._last_obs.items()}
+                    route = public_route(obs)
+                    if route:
+                        self.model.route_memory.offer(
+                            obs, route["actions"], ("P3c", info["teaching_seed"]), "learner"
+                        )
         if self.config.recovery:
             import hashlib
 
             from ather_exploration.training.public_route import public_route
 
+            aggregated = self.config.recovery.sampling == "aggregated_teaching"
+            balanced = self.config.recovery.sampling == "disagreement_balanced"
+            if balanced:
+                # Frozen rollout policy distribution on PRE-action observations.
+                with torch.no_grad():
+                    tensor, _ = self.model.policy.obs_to_tensor(self.model._last_obs)
+                    preferred = (
+                        self.model.policy.get_distribution(tensor)
+                        .distribution.probs.argmax(dim=1)
+                        .cpu()
+                        .numpy()
+                    )
             for i, info in enumerate(self.locals["infos"]):
-                if not info.get("route_eligible"):
+                if aggregated:
+                    obs = {key: value[i] for key, value in self.model._last_obs.items()}
+                    route = public_route(obs)
+                    if route is not None:
+                        self.model.route_memory.offer(
+                            obs,
+                            route["actions"],
+                            (info["route_source_task"], info["route_seed"]),
+                            "learner",
+                        )
+                    continue
+                if not info.get("route_eligible") and not (
+                    balanced and info.get("route_revisited")
+                ):
                     continue
                 obs = {key: value[i] for key, value in self.model._last_obs.items()}
                 # Deduplicate geometry + goal + agent position, ignoring age/time/visit counts.
                 digest = hashlib.sha256(obs["memory"][[0, 1, 2, 3, 4, 7]].tobytes()).digest()
-                if digest in self.route_seen:
-                    continue
-                self.route_seen.add(digest)
+                if not balanced:
+                    if digest in self.route_seen:
+                        continue
+                    self.route_seen.add(digest)
                 route = public_route(obs)
                 if route is None:
+                    continue
+                if balanced:
+                    self.balanced_samples.offer(
+                        obs,
+                        route["actions"],
+                        disagreement=bool(
+                            info.get("route_revisited") and not route["actions"][preferred[i]]
+                        ),
+                        ordinary=bool(info.get("route_eligible")),
+                        source=(info["route_source_task"], info["route_seed"]),
+                    )
                     continue
                 self.route_candidates += 1
                 sample = ({key: value.copy() for key, value in obs.items()}, route["actions"])
@@ -544,6 +594,10 @@ class SkillCallback(BaseCallback):
 
     def _on_training_start(self):
         self.seed_recovery()
+        if self.config.recovery and self.config.recovery.sampling == "aggregated_teaching":
+            from ather_exploration.training.route_teaching import initialize_teaching
+
+            initialize_teaching(self.model, self.config)
 
     def _on_rollout_start(self):
         self.boundary()
@@ -551,6 +605,15 @@ class SkillCallback(BaseCallback):
             self.model.route_samples = []
             self.route_seen.clear()
             self.route_candidates = 0
+            if self.config.recovery.sampling == "disagreement_balanced":
+                from ather_exploration.training.route_sampling import BalancedRouteSamples
+
+                self.balanced_samples = BalancedRouteSamples(self.config.recovery.label_limit)
+
+    def _on_rollout_end(self):
+        if self.balanced_samples is not None:
+            self.model.route_samples, wrong = self.balanced_samples.select()
+            self.model.logger.record("train/route_disagreement_labels", wrong)
 
     def _on_training_end(self):
         self.boundary()
@@ -592,6 +655,10 @@ def run_skill_training(
         resume is None or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
     ):
         raise ValueError("Unfinished trial requires only --resume")
+    if config.p4_transfer and (
+        not resume or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P4 requires only --resume; no other transfer flags")
     identities = preflight(config)
     root.mkdir(parents=True)
     write_record(
@@ -601,7 +668,15 @@ def run_skill_training(
             "source_revision": implementation_id(),
             "bank_ids": identities,
             "scope": "skill_curriculum_pilot",
-            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
+            "learning_objective": (
+                "ppo_temporal_threat_with_safe_retention"
+                if config.p4_transfer
+                else "ppo_separate_public_teaching"
+                if config.recovery and config.recovery.sampling == "aggregated_teaching"
+                else "ppo_public_route_aux"
+                if config.recovery
+                else config.method
+            ),
             "curriculum_protocol": "active-phase-v3",
             "resume": str(resume) if resume else None,
         },
@@ -629,7 +704,17 @@ def run_skill_training(
             p3_task_budget=config.skills.p3_task_budget,
         )
         transfer = None
-        if config.recovery:
+        if config.p4_transfer:
+            from ather_exploration.training.p4_transfer import prepare_p4
+
+            model, state, transfer = prepare_p4(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            if state.get("workers"):
+                for i, worker in enumerate(state["workers"]):
+                    env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["resume_rng_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif config.recovery:
             from ather_exploration.training.recovery import prepare_recovery
 
             model, state, transfer = prepare_recovery(resume, config, env)

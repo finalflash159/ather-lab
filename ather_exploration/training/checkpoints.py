@@ -84,7 +84,16 @@ def inspect_checkpoint(
         and not (
             (recovery or inference)
             and meta.get("source_revision")
-            == "28e2dff54a78e80dd1b2f53ae1de6f667b1ddc8ef69aec554b5e9c0461e73e8b"
+            in {
+                "28e2dff54a78e80dd1b2f53ae1de6f667b1ddc8ef69aec554b5e9c0461e73e8b",
+                "b8ab7598e58dcf56820a13aba394e16a88e055cdb28777e0ed79c52dd9421a88",
+            }
+        )
+        # Download transport-only fix: policy/environment semantics unchanged.
+        and not (
+            inference
+            and meta.get("source_revision")
+            == "17e3e864172cc7cd52e2a70cc6b293258192b0f39b9d748aa643e4de790797c8"
         )
         and not (transfer_p1_to_p2 and meta.get("source_revision") == P1_TRANSFER_SOURCE)
         and not (
@@ -139,7 +148,15 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
         meta = {
             "artifact_schema": "g4-checkpoint-v1",
             "method": config.method,
-            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
+            "learning_objective": (
+                "ppo_temporal_threat_with_safe_retention"
+                if config.p4_transfer
+                else "ppo_separate_public_teaching"
+                if config.recovery and config.recovery.sampling == "aggregated_teaching"
+                else "ppo_public_route_aux"
+                if config.recovery
+                else config.method
+            ),
             "env_steps": model.num_timesteps,
             "source_revision": implementation_id(),
             "schema": schema_signature(model.observation_space),

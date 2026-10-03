@@ -59,15 +59,21 @@ class SearchDiagnostics:
 def evaluate_skill(model, task, config, *, agent=None, split="validation"):
     from ather_exploration.evaluation.p3 import ExplorationDiagnostics, add_p3_gates
     from ather_exploration.worlds.p3_tasks import map_group, p3_pool
+    from ather_exploration.worlds.p4_tasks import group as threat_group
 
     agent = agent if agent is not None else LearnedAgent(model, {})
+    is_p4 = config.skills.p4.enabled and task.startswith("P4")
     is_p3 = task in ("P3a", "P3b", "P3c")
     if split not in ("validation", "ood") or (split == "ood" and not is_p3):
         raise ValueError("Choose validation or P3 OOD; heldout test is not a tuning split")
     pool = (
         p3_pool(task, config.skills.validation_count, split)
         if is_p3
-        else skill_pool(task, config.skills.validation_count, True)
+        else (
+            skill_pool(task, config.skills.validation_count, True, p4=True)
+            if config.skills.p4.enabled
+            else skill_pool(task, config.skills.validation_count, True)
+        )
     )
     rows = []
     for seed, _ in pool:
@@ -96,7 +102,11 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                     actual_position = scenario.spawn
                     no_progress = longest_no_progress = 0
                     search = SearchDiagnostics(obs, floors)
-                    exploration = ExplorationDiagnostics(scenario, obs) if is_p3 else None
+                    exploration = (
+                        ExplorationDiagnostics(scenario, obs)
+                        if is_p3 or is_p4 and task != "P4a"
+                        else None
+                    )
                     initial_coverage = (
                         exploration.coverage
                         if exploration
@@ -156,9 +166,13 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                         exploration.room_coverage_min if exploration else tile_coverage
                     )
                     coverage_threshold = (
-                        config.skills.p3_gates.room_coverage
-                        if task in ("P3b", "P3c")
-                        else config.skills.p3_gates.coverage
+                        config.skills.p4.room_coverage
+                        if is_p4
+                        else (
+                            config.skills.p3_gates.room_coverage
+                            if task in ("P3b", "P3c", "P4b", "P4c")
+                            else config.skills.p3_gates.coverage
+                        )
                     )
                     coverage_auc = (
                         sum(coverage_history)
@@ -168,7 +182,13 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                         {
                             **search.row(),
                             **(exploration.row() if exploration else {}),
-                            **(map_group(scenario) if is_p3 else {}),
+                            **(
+                                map_group(scenario)
+                                if is_p3
+                                else threat_group(scenario)
+                                if is_p4
+                                else {}
+                            ),
                             "joint_success": float(success and coverage >= coverage_threshold),
                             "approach_efficiency": (
                                 approach_distance
@@ -216,6 +236,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             key: float(np.mean([r.get(key, 0.0) for r in selected]))
             for key in (
                 "success",
+                "joint_success",
                 "coverage",
                 "tile_coverage",
                 "room_coverage_min",
@@ -256,7 +277,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             values = [r.get(key, 0.0) for r in selected if r[key] is not None]
             mode_summary[key] = float(np.mean(values)) if values else None
             mode_summary[f"{key}_count"] = len(values)
-        if task in ("P3", "P4b"):
+        if task in ("P3", "P4b", "P4c"):
             summary["deterministic" if mode else "stochastic"]["survival"] = float(
                 np.mean([r["survival"] for r in selected])
             )
@@ -286,6 +307,8 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
         "P4a": (0.85, 0.80),
         "P4b": (0.65, 0.65),
     }
+    if is_p4:
+        thresholds[task] = (0.85, 0.80) if task == "P4a" else (config.skills.p4.success,) * 2
     if is_p3:
         thresholds[task] = (
             config.skills.p3_gates.success,
@@ -330,7 +353,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                 0.10,
                 maximum=True,
             )
-    if task == "P4b":
+    if task == "P4b" and not is_p4:
         for m in summary:
             passed &= check(f"{m}/survival", summary[m]["survival"], 0.80)
     if task in ("P3", "P4a"):
@@ -343,7 +366,25 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                 float(np.mean(values)) if values else 0.0,
                 0.70 if task == "P3" else 0.75,
             )
+    if is_p4 and task != "P4a":
+        g = config.skills.p4
+        for mode in summary:
+            passed &= check(f"{mode}/survival", summary[mode]["survival"], g.survival)
+        d = summary["deterministic"]
+        passed &= check("deterministic/coverage", d["coverage"], g.room_coverage)
+        passed &= check("deterministic/coverage_auc", d["coverage_auc"], g.coverage_auc)
+        passed &= check("deterministic/joint_success", d["joint_success"], g.joint)
+        passed &= check("deterministic/wall_block", d["wall_block"], 0.10, maximum=True)
     groups = {}
+    if is_p4:
+        for field in ("size", "monster_count", "poi_count"):
+            for value in sorted({r[field] for r in rows}):
+                selected = [r for r in rows if r["deterministic"] and r[field] == value]
+                groups[f"{field}/{value}"] = {
+                    "count": len(selected),
+                    "success": float(np.mean([r["success"] for r in selected])),
+                    "death": float(np.mean([r["death"] for r in selected])),
+                }
     if is_p3:
         p3_passed, groups = add_p3_gates(task, rows, summary, check, config)
         passed &= p3_passed
@@ -353,7 +394,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
         "task": task,
         "validation_scope": "current_phase_only",
         "gate_status": "pilot_thresholds"
-        if task in ("P2b", "P2c", "P3a", "P3b", "P3c")
+        if task in ("P2b", "P2c", "P3a", "P3b", "P3c") or is_p4
         else "configured",
         "approach_reference": "evaluator-only geodesic distance at first sighting; failures zero",
         "efficiency_reference": "full-map shortest path from spawn; POI location is oracle",
@@ -363,8 +404,8 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             else "first POI; discovery action included in before_seen coverage"
         ),
         "coverage_definition": (
-            "minimum per-room coverage and its time average for P3b/P3c; aggregate tile coverage for P3a"
-            if task in ("P3a", "P3b", "P3c")
+            "minimum per-room coverage and its time average for P3b/P3c/P4b/P4c; aggregate tile coverage for P3a"
+            if task in ("P3a", "P3b", "P3c") or is_p4 and task != "P4a"
             else "aggregate tile coverage"
         ),
         "passed": bool(passed),

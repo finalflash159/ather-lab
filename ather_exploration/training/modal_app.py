@@ -134,7 +134,15 @@ def execute(
         not parent or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
     ):
         raise ValueError("Unfinished trial requires only --resume")
+    if config.p4_transfer and (
+        not parent or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P4 uses only --resume")
     if command == "check" and parent:
+        if config.p4_transfer:
+            from ather_exploration.training.p4_transfer import check_p4
+
+            return {**resources, **check_p4(parent, config)}
         if config.recovery:
             from ather_exploration.training.recovery import check_recovery
 

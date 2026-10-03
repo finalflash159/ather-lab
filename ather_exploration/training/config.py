@@ -68,6 +68,17 @@ class P3GateConfig(FrozenConfig):
     wall_block: float = Field(default=0.10, ge=0, le=1)
 
 
+class P4Config(FrozenConfig):
+    enabled: bool = False
+    task_budget: int = Field(default=1048576, ge=65536)
+    minimum: int = Field(default=65536, ge=32768)
+    success: float = Field(default=0.75, ge=0, le=1)
+    survival: float = Field(default=0.85, ge=0, le=1)
+    joint: float = Field(default=0.65, ge=0, le=1)
+    room_coverage: float = Field(default=0.50, ge=0, le=1)
+    coverage_auc: float = Field(default=0.40, ge=0, le=1)
+
+
 class SkillConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     enabled: bool = False
@@ -78,6 +89,7 @@ class SkillConfig(BaseModel):
     activation: float = Field(default=0.5, gt=0, allow_inf_nan=False)
     death: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     frontier: bool = False
+    p4: P4Config = Field(default_factory=P4Config)
     p3_visit_bonus: float = Field(default=0.0, ge=0, le=0.01, allow_inf_nan=False)
     p3_visit_cap: float = Field(default=0.1, gt=0, le=0.5, allow_inf_nan=False)
     first_visit: bool = False
@@ -164,6 +176,7 @@ class TrainingConfig(FrozenConfig):
     unfinished_trial: UnfinishedTrial | None = None
     p3_resume: P3ResumeConfig | None = None
     recovery: RecoveryConfig | None = None
+    p4_transfer: bool = False
     seed: int = Field(default=0, ge=0, lt=2**32)
     total_timesteps: int = Field(default=4096, gt=0)
     n_envs: int = Field(default=1, gt=0, le=64)
@@ -186,6 +199,32 @@ class TrainingConfig(FrozenConfig):
     @model_validator(mode="after")
     def coherent(self):
         rollout = self.n_envs * self.n_steps
+        if self.p4_transfer:
+            if (
+                not self.skills.enabled
+                or not self.skills.p4.enabled
+                or not self.skills.frontier
+                or self.method != "ppo"
+                or self.skills.stop_after != "P4"
+                or self.recovery
+                or self.p3_resume
+                or self.lr_trial
+                or self.unfinished_trial
+                or self.p3_restart
+                or self.skills.wall_mask
+            ):
+                raise ValueError(
+                    "P4 transfer requires frontier PPO through P4 with no other transfer"
+                )
+            if (
+                self.skills.p4.minimum > self.skills.p4.task_budget
+                or self.skills.p4.task_budget % self.skills.eval_interval
+                or self.skills.p4.minimum % self.skills.eval_interval
+                or self.total_timesteps < 1638400 + 3 * self.skills.p4.task_budget
+            ):
+                raise ValueError("P4 budgets must cover all three stages and align evaluation")
+        if self.skills.p4.enabled and not self.p4_transfer:
+            raise ValueError("P4 design requires explicit audited transfer")
         if self.recovery:
             r = self.recovery
             if (
@@ -265,7 +304,9 @@ class TrainingConfig(FrozenConfig):
             if resume.minimum_remaining >= self.skills.p3_horizon:
                 raise ValueError("P3 replay must leave a nonempty episode suffix")
 
-        if self.skills.frontier and (not self.skills.enabled or self.skills.stop_after != "P3"):
+        if self.skills.frontier and (
+            not self.skills.enabled or self.skills.stop_after != "P3" and not self.p4_transfer
+        ):
             raise ValueError("Frontier currently supported for the P3 training family")
         if self.p3_restart and (
             self.lr_trial
