@@ -77,8 +77,18 @@ class Viewer:
         if spec.checkpoint:
             from ather_exploration.training.checkpoints import inspect_checkpoint
 
-            path, _ = inspect_checkpoint(spec.checkpoint, inference=True)
+            path, _ = inspect_checkpoint(
+                spec.checkpoint,
+                inference=True,
+                diagnostic_source_mismatch=spec.diagnostic_source_mismatch,
+            )
             spec = replace(spec, checkpoint=str(path))
+        if spec.diagnostic_source_mismatch:
+            print(
+                "WARNING: diagnostic inference on current maps; this checkpoint was trained "
+                "from a different source revision. Do not treat this as a reproducible eval.",
+                flush=True,
+            )
         pygame.init()
         pygame.display.set_caption("Ather | Agent viewer")
         self.screen = pygame.display.set_mode((1200, 760), pygame.RESIZABLE)
@@ -183,8 +193,10 @@ class Viewer:
             f"{(self.controller.frame or {}).get('phase') or self.spec.preset} | seed {self.spec.seed} | {self.spec.agent} | {status}",
             20,
             115,
-            RED if self.controller.error else BLUE,
+            RED if self.controller.error or self.spec.diagnostic_source_mismatch else BLUE,
         )
+        if self.spec.diagnostic_source_mismatch:
+            self.text("DIAGNOSTIC ONLY • checkpoint source differs; current map generator", 20, 138, RED)
         panels = [
             pygame.Rect(20, 165, (width - 60) // 2, height - 245),
             pygame.Rect(40 + (width - 60) // 2, 165, (width - 60) // 2, height - 245),

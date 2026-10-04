@@ -120,6 +120,7 @@ class Scenario:
             "P3c",
             "P4a",
             "P4b",
+            "P4c",
         ):
             raise ValueError("Unknown skill task")
         if self.skill_task is not None and self.fixture_only:

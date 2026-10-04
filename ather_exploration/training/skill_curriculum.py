@@ -24,6 +24,14 @@ class SkillController:
     p3_minimum: int = 65536
     p3_task_budget: int = 524288
     recovery_p3b_budget: int | None = None
+    recovery_p3c_budget: int | None = None
+    threat_level: int = 0
+    threat_streak: int = 0
+    threat_level_start: int = 1638400
+    p4_enabled: bool = False
+    p4_task_budget: int = 1048576
+    p4_minimum: int = 65536
+    p4_force_advance: bool = False
 
     def observe_restart(self, level, progress, window, rate):
         """Public novelty mastery; separate from validation gate and task promotion."""
@@ -43,10 +51,16 @@ class SkillController:
 
     @property
     def minimum(self):
+        if self.p4_enabled and self.task.startswith("P4"):
+            return self.p4_minimum
         return self.p3_minimum if self.task.startswith("P3") else MINIMUM[self.index]
 
     @property
     def budget(self):
+        if self.p4_enabled and self.task.startswith("P4"):
+            return self.p4_task_budget
+        if self.task == "P3c" and self.recovery_p3c_budget is not None:
+            return self.recovery_p3c_budget
         if self.task == "P3b" and self.recovery_p3b_budget is not None:
             return self.recovery_p3b_budget
         if self.task.startswith("P3"):
@@ -55,7 +69,8 @@ class SkillController:
 
     @property
     def task(self):
-        return STAGES[self.index]
+        stages = (*STAGES[:10], "P4c", *STAGES[10:]) if self.p4_enabled else STAGES
+        return stages[self.index]
 
     @property
     def stage(self):
@@ -91,12 +106,28 @@ class SkillController:
             return True
         budget = self.budget
         self.failed = (
-            elapsed if self.task.startswith(("P2", "P3")) else steps - self.family_start
+            elapsed
+            if self.task.startswith(("P2", "P3")) or self.p4_enabled and self.task.startswith("P4")
+            else steps - self.family_start
         ) >= budget
+        if self.p4_force_advance and self.task == "P4b" and self.failed:
+            self.history[-1]["forced_advance"] = "budget_exhausted_after_gate_failure"
+            self.index += 1
+            self.phase_start = steps
+            self.family_start = steps
+            self.passed = 0
+            self.failed = False
+            return True
         return False
 
     def mixture(self):
         """Geometry sources only; all episodes use the active phase rules."""
+        if self.p4_enabled and self.task.startswith("P4"):
+            return {
+                "P4a": [("P4a", 0.8), ("P3c", 0.2)],
+                "P4b": [("P4b", 0.7), ("P4a", 0.1), ("P3c", 0.2)],
+                "P4c": [("P4c", 0.7), ("P4b", 0.1), ("P3c", 0.2)],
+            }[self.task]
         return {
             "P1a": [("P1a", 1.0)],
             "P1b": [("P1b", 0.75), ("P1a", 0.25)],

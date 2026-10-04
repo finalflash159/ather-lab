@@ -25,6 +25,32 @@ class RoutePPO(PPO):
         """
         Update policy using the currently gathered rollout buffer.
         """
+        if hasattr(self, "threat_retention"):
+            from ather_exploration.training.threat_retention import retain
+
+            super().train()
+            if hasattr(self, "timing_teaching"):
+                from ather_exploration.training.timing_teaching import teach_timing
+
+                for key, value in teach_timing(self).items():
+                    self.logger.record(f"timing/{key}", value)
+            for key, value in retain(self).items():
+                self.logger.record(f"retention/{key}", value)
+            self.logger.record("retention/samples", len(self.threat_retention.memory))
+            return
+        if hasattr(self, "route_memory"):
+            from ather_exploration.training.route_teaching import teach
+
+            super().train()
+            batches = getattr(self, "teaching_batches", 8)
+            result = teach(self, batches=batches) if batches else {}
+            self.logger.record("teaching/enabled", int(batches > 0))
+            for key, value in result.items():
+                self.logger.record(f"teaching/{key}", value)
+            self.logger.record("teaching/samples", len(self.route_memory))
+            self.logger.record("teaching/updates", self.route_memory.aux_updates)
+            self.logger.record("teaching/collection_steps", self.route_memory.collection_steps)
+            return
         if not getattr(self, "route_samples", None) or not self.route_coefficient:
             return super().train()
         route_losses = []

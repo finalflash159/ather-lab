@@ -26,7 +26,7 @@ from ather_exploration.worlds.scenarios import implementation_id, write_record
 def task_score(result):
     """Gate satisfaction first; quality tie-breaks belong to the current objective."""
     d = result["summary"]["deterministic"]
-    if result["task"].startswith("P3"):
+    if result["task"].startswith("P3") or result["task"] in ("P4b", "P4c"):
         quality = [d["joint_success"], d["success"], d["coverage_auc"]]
     elif result["task"] == "P2c":
         quality = [d["success"], d["coverage_auc"], d["coverage"]]
@@ -50,7 +50,7 @@ def preflight(config):
         from ather_exploration.training.curriculum import WorldBank
 
         ids.update(WorldBank(config.banks).identities)
-    for task in TASKS:
+    for task in (*TASKS, *(("P4c",) if config.skills.p4.enabled else ())):
         env = configured_skill_env(task, 0, config.skills)
         try:
             obs, _ = env.reset()
@@ -80,26 +80,89 @@ class SkillCallback(BaseCallback):
         self.transfer = None
         self.route_seen = set()
         self.route_candidates = 0
+        self.balanced_samples = None
+        from ather_exploration.training.threat_training import SourceTelemetry
+
+        self.source_telemetry = SourceTelemetry()
 
     def _on_step(self):
         if not np.isfinite(self.locals["rewards"]).all():
             raise ValueError("Nonfinite rewards")
+        if self.config.p4_transfer:
+            self.source_telemetry.observe(self.model, self.locals, self.n_calls)
+            if self.config.skills.p4.recovery:
+                if self.config.skills.p4.timing:
+                    self.model.timing_teaching.active_task = self.controller.task
+                self.model.threat_retention.collect(
+                    self.model._last_obs, self.locals["infos"], self.n_calls
+                )
+                if self.config.skills.p4.timing:
+                    self.model.timing_teaching.collect(self.model._last_obs, self.locals["infos"])
+        if self.config.p4_transfer and self.config.skills.p4.teaching_batches:
+            from ather_exploration.training.public_route import public_route
+
+            for i, info in enumerate(self.locals["infos"]):
+                if info.get("teaching_safe_source"):
+                    self.model.route_memory.collection_steps += 1
+                    obs = {key: value[i] for key, value in self.model._last_obs.items()}
+                    route = public_route(obs)
+                    if route:
+                        self.model.route_memory.offer(
+                            obs, route["actions"], ("P3c", info["teaching_seed"]), "learner"
+                        )
         if self.config.recovery:
             import hashlib
 
             from ather_exploration.training.public_route import public_route
 
+            aggregated = self.config.recovery.sampling == "aggregated_teaching"
+            balanced = self.config.recovery.sampling == "disagreement_balanced"
+            if balanced:
+                # Frozen rollout policy distribution on PRE-action observations.
+                with torch.no_grad():
+                    tensor, _ = self.model.policy.obs_to_tensor(self.model._last_obs)
+                    preferred = (
+                        self.model.policy.get_distribution(tensor)
+                        .distribution.probs.argmax(dim=1)
+                        .cpu()
+                        .numpy()
+                    )
             for i, info in enumerate(self.locals["infos"]):
-                if not info.get("route_eligible"):
+                if aggregated:
+                    obs = {key: value[i] for key, value in self.model._last_obs.items()}
+                    route = public_route(obs)
+                    if route is not None:
+                        self.model.route_memory.offer(
+                            obs,
+                            route["actions"],
+                            (info["route_source_task"], info["route_seed"]),
+                            "learner",
+                        )
+                    continue
+                if not info.get("route_eligible") and not (
+                    balanced and info.get("route_revisited")
+                ):
                     continue
                 obs = {key: value[i] for key, value in self.model._last_obs.items()}
                 # Deduplicate geometry + goal + agent position, ignoring age/time/visit counts.
                 digest = hashlib.sha256(obs["memory"][[0, 1, 2, 3, 4, 7]].tobytes()).digest()
-                if digest in self.route_seen:
-                    continue
-                self.route_seen.add(digest)
+                if not balanced:
+                    if digest in self.route_seen:
+                        continue
+                    self.route_seen.add(digest)
                 route = public_route(obs)
                 if route is None:
+                    continue
+                if balanced:
+                    self.balanced_samples.offer(
+                        obs,
+                        route["actions"],
+                        disagreement=bool(
+                            info.get("route_revisited") and not route["actions"][preferred[i]]
+                        ),
+                        ordinary=bool(info.get("route_eligible")),
+                        source=(info["route_source_task"], info["route_seed"]),
+                    )
                     continue
                 self.route_candidates += 1
                 sample = ({key: value.copy() for key, value in obs.items()}, route["actions"])
@@ -229,8 +292,21 @@ class SkillCallback(BaseCallback):
                 if not np.isfinite(v):
                     raise ValueError(f"Nonfinite optimizer metric: {k}")
                 metrics[k] = float(v)
-        for task in {r.get("task") for r in self.episodes} - {None}:
-            subset = [r for r in self.episodes if r.get("task") == task and not r.get("cancelled")]
+        if self.config.p4_transfer:
+            metrics.update(self.source_telemetry.drain())
+            if self.config.skills.p4.recovery:
+                from ather_exploration.training.threat_training import update_threat_exploration
+
+                metrics["threat_lesson/exploration_epsilon"] = update_threat_exploration(
+                    self.model, self.config
+                )
+                if self.config.skills.p4.timing:
+                    metrics["timing/temperature"] = self.model.policy.threat_temperature
+        source_key = "source_task" if self.config.p4_transfer else "task"
+        for task in {r.get(source_key) for r in self.episodes} - {None}:
+            subset = [
+                r for r in self.episodes if r.get(source_key) == task and not r.get("cancelled")
+            ]
             if subset:
                 for key in ("return", "length", "intrinsic_return"):
                     metrics[f"skill_train/{task}/{key}"] = float(np.mean([r[key] for r in subset]))
@@ -241,6 +317,7 @@ class SkillCallback(BaseCallback):
                     "death",
                     "intrinsic",
                     "room_exploration",
+                    "completion_bonus",
                     "step_cost",
                     "wall_penalty",
                 ):
@@ -341,12 +418,75 @@ class SkillCallback(BaseCallback):
             if not self.controller.task.startswith("P5"):
                 result = self.evaluate(self.controller.task)
                 passed = result["passed"]
+                lesson_changed = False
+                if self.config.skills.p4.recovery and self.controller.task == "P4a":
+                    from ather_exploration.training.threat_lessons import (
+                        observe_lesson,
+                        probe_lesson,
+                    )
+
+                    mode = self.model.policy.training
+                    try:
+                        probe = probe_lesson(self.model, self.config, self.controller.threat_level)
+                    finally:
+                        self.model.policy.set_training_mode(mode)
+                    self.controller.eval_steps += probe["steps"]
+                    append_jsonl(
+                        self.root / "threat_lessons.jsonl", {"training_steps": steps, **probe}
+                    )
+                    balanced = self.config.skills.p4.balanced_families
+                    if not balanced:
+                        lesson_changed = observe_lesson(self.controller, probe, steps)
+                        ready = (
+                            self.controller.threat_level == 3
+                            and steps - self.controller.threat_level_start >= 16384
+                        )
+                        passed = passed and ready
+                        metrics["threat_lesson/level"] = self.controller.threat_level
+                    metrics["threat_lesson/train_probe_success"] = probe["success"]
+                    print(
+                        f"[encounter] probe={probe['success']:.3f} "
+                        + (
+                            "diagnostic_only=True"
+                            if balanced
+                            else f"level={self.controller.threat_level} probe_ready={ready}"
+                        ),
+                        flush=True,
+                    )
+                if self.config.skills.p4.recovery:
+                    from ather_exploration.training.threat_lessons import retention_report
+
+                    report = retention_report(self.model, self.config)
+                    self.controller.eval_steps += report["steps"]
+                    metrics["retention/validation_success"] = report["success"]
+                    append_jsonl(
+                        self.root / "retention_evaluations.jsonl",
+                        {"training_steps": steps, **report},
+                    )
+                    print(
+                        f"[retention:P3c] success={report['success']:.4f} (diagnostic, not promotion gate)",
+                        flush=True,
+                    )
                 # Advancement depends only on the current objective's validation.
                 # Earlier geometry is training data, not a separate retention exam.
                 for mode, values in result["summary"].items():
                     for k, v in values.items():
                         if v is not None:
                             metrics[f"skills/{self.controller.task}/{mode}/{k}"] = v
+                for mode, families in result.get("timing_adherence", {}).items():
+                    for family, values in families.items():
+                        for key, value in values.items():
+                            if value is not None:
+                                metrics[
+                                    f"skills/{self.controller.task}/{mode}/timing/{family}/{key}"
+                                ] = value
+                        print(
+                            f"[timing-follow:{self.controller.task}] mode={mode} family={family} "
+                            f"WAIT={values['wait_follow']}/{values['wait_labels']} "
+                            f"GO={values['go_follow']}/{values['go_labels']} "
+                            f"exact={values['exact_follow']}/{values['labels']}",
+                            flush=True,
+                        )
                 previous = self.controller.task
                 score = task_score(result)
                 prior = self.controller.best_by_task.get(previous)
@@ -375,15 +515,23 @@ class SkillCallback(BaseCallback):
                         }
                     )
                 else:
-                    changed = self.controller.observe(passed, steps)
+                    changed = self.controller.observe(passed, steps) or lesson_changed
                 gate = self.controller.history[-1]
                 print(
-                    f"[gate:{previous}] raw_pass={passed} eligible={gate['eligible']} "
+                    f"[gate:{previous}] raw_pass={result['passed']} promotion_pass={passed} eligible={gate['eligible']} "
                     f"streak={gate['streak']}/2 elapsed={gate['elapsed']} "
                     f"minimum={gate['minimum']} budget="
                     f"{gate_budget}",
                     flush=True,
                 )
+                if gate.get("forced_advance"):
+                    metrics["curriculum/forced_advance"] = 1
+                    metrics["curriculum/forced_advance_from"] = previous
+                    print(
+                        f"[forced-advance] {previous}->P4c after budget exhaustion; "
+                        "gate remains failed and this run is experimental",
+                        flush=True,
+                    )
                 if self.controller.failed:
                     self.state = "REVIEW_REQUIRED" if self.config.recovery else "PHASE_GATE_FAILED"
                 if (
@@ -437,6 +585,12 @@ class SkillCallback(BaseCallback):
             + self.config.unfinished_trial.additional_steps
         ):
             self.state = "EXPERIMENT_COMPLETED"
+        if (
+            self.config.skills.p4.recovery
+            and steps >= self.config.total_timesteps
+            and self.state == "RUNNING"
+        ):
+            self.state = "BUDGET_EXHAUSTED"
         self.viewer_task = (
             previous if changed and self.state == "PHASE_COMPLETED" else self.controller.task
         )
@@ -481,6 +635,21 @@ class SkillCallback(BaseCallback):
                 if self.controller.task in ("P3b", "P3c")
                 else steps
             )
+        timing_report = []
+        if self.config.p4_transfer and self.config.skills.p4.timing:
+            for kind in ("wait", "go"):
+                before = metrics.get(f"timing/{kind}_target_mass_before")
+                after = metrics.get(f"timing/{kind}_target_mass_after")
+                margin = metrics.get(f"timing/{kind}_logit_margin_delta")
+                if before is not None and after is not None and margin is not None:
+                    timing_report.append(
+                        f"{kind.upper()}_mass={before:.3f}->{after:.3f} dlogit={margin:+.3f}"
+                    )
+            if "timing/accepted" in metrics or "timing/rejected" in metrics:
+                timing_report.append(
+                    f"timing_update={int(metrics.get('timing/accepted', 0))} accepted/"
+                    f"{int(metrics.get('timing/rejected', 0))} rejected"
+                )
         print(
             f"[skills:{self.root.name}] {steps:,}/{end_steps:,} task={self.controller.task} state={self.state} "
             + " ".join(
@@ -490,6 +659,8 @@ class SkillCallback(BaseCallback):
             ),
             flush=True,
         )
+        if timing_report:
+            print(f"[timing-update:{self.root.name}] " + " | ".join(timing_report), flush=True)
         if (
             steps % (self.config.checkpoint_updates * self.config.n_envs * self.config.n_steps) == 0
             or steps % self.config.skills.eval_interval == 0
@@ -544,13 +715,29 @@ class SkillCallback(BaseCallback):
 
     def _on_training_start(self):
         self.seed_recovery()
+        if self.config.recovery and self.config.recovery.sampling == "aggregated_teaching":
+            from ather_exploration.training.route_teaching import initialize_teaching
+
+            initialize_teaching(self.model, self.config)
 
     def _on_rollout_start(self):
         self.boundary()
+        if self.config.skills.p4.recovery:
+            self.model.threat_retention.guard.buckets.clear()
+            self.model.threat_retention.guard.counts.clear()
         if self.config.recovery:
             self.model.route_samples = []
             self.route_seen.clear()
             self.route_candidates = 0
+            if self.config.recovery.sampling == "disagreement_balanced":
+                from ather_exploration.training.route_sampling import BalancedRouteSamples
+
+                self.balanced_samples = BalancedRouteSamples(self.config.recovery.label_limit)
+
+    def _on_rollout_end(self):
+        if self.balanced_samples is not None:
+            self.model.route_samples, wrong = self.balanced_samples.select()
+            self.model.logger.record("train/route_disagreement_labels", wrong)
 
     def _on_training_end(self):
         self.boundary()
@@ -592,6 +779,10 @@ def run_skill_training(
         resume is None or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
     ):
         raise ValueError("Unfinished trial requires only --resume")
+    if config.p4_transfer and (
+        not resume or continue_curriculum or transfer_p1_to_p2 or transfer_p2_to_p3
+    ):
+        raise ValueError("P4 requires only --resume; no other transfer flags")
     identities = preflight(config)
     root.mkdir(parents=True)
     write_record(
@@ -601,7 +792,17 @@ def run_skill_training(
             "source_revision": implementation_id(),
             "bank_ids": identities,
             "scope": "skill_curriculum_pilot",
-            "learning_objective": "ppo_public_route_aux" if config.recovery else config.method,
+            "learning_objective": (
+                "ppo_public_timing_with_safe_retention"
+                if config.p4_transfer and config.skills.p4.timing
+                else "ppo_temporal_threat_with_safe_retention"
+                if config.p4_transfer
+                else "ppo_separate_public_teaching"
+                if config.recovery and config.recovery.sampling == "aggregated_teaching"
+                else "ppo_public_route_aux"
+                if config.recovery
+                else config.method
+            ),
             "curriculum_protocol": "active-phase-v3",
             "resume": str(resume) if resume else None,
         },
@@ -629,7 +830,17 @@ def run_skill_training(
             p3_task_budget=config.skills.p3_task_budget,
         )
         transfer = None
-        if config.recovery:
+        if config.p4_transfer:
+            from ather_exploration.training.p4_transfer import prepare_p4
+
+            model, state, transfer = prepare_p4(resume, config, env)
+            controller = SkillController(**state["skill_controller"])
+            if state.get("workers"):
+                for i, worker in enumerate(state["workers"]):
+                    env.env_method("restore", worker, indices=i)
+            restore_rng(Path(transfer["resume_rng_checkpoint"]))
+            write_record(root / "transfer.json", transfer)
+        elif config.recovery:
             from ather_exploration.training.recovery import prepare_recovery
 
             model, state, transfer = prepare_recovery(resume, config, env)

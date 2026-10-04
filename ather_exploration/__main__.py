@@ -14,6 +14,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ather Exploration — G0/G1/G2/G3")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
+    preview = commands.add_parser(
+        "preview-maps", help="Browse skill train/validation maps without a policy"
+    )
+    preview.add_argument(
+        "--config", type=Path, required=True, help="Training YAML defining the exact pools"
+    )
+    preview.add_argument(
+        "--task",
+        choices=("P1a", "P1b", "P2a", "P2b", "P2c", "P3a", "P3b", "P3c", "P4a", "P4b", "P4c"),
+        default="P4a",
+    )
+    preview.add_argument("--split", choices=("train", "validation"), default="train")
+    preview.add_argument("--index", type=int, default=0)
     skills_parser = commands.add_parser(
         "build-skills", help="Validate and record skill seed pools; no training"
     )
@@ -98,6 +111,11 @@ def main() -> None:
     )
     ui_parser.add_argument("--stochastic", action="store_true")
     ui_parser.add_argument("--replay", type=Path)
+    ui_parser.add_argument(
+        "--diagnostic-source-mismatch",
+        action="store_true",
+        help="View only the archived P4a checkpoint with matching v4 schema; not for eval/resume",
+    )
     train_parser = commands.add_parser("train", help="Explicitly start learning (never implicit)")
     train_parser.add_argument("--config", type=Path, required=True)
     train_parser.add_argument("--output", type=Path, required=True)
@@ -128,11 +146,26 @@ def main() -> None:
     policy_eval.add_argument("--action-seed", type=int, default=0)
     policy_eval.add_argument("--stochastic", action="store_true")
     skill_eval = commands.add_parser(
-        "evaluate-skills", help="Evaluate P3 validation/OOD without learning"
+        "evaluate-skills", help="Evaluate skill-task validation/OOD without learning"
     )
     skill_eval.add_argument("--config", type=Path, required=True)
     skill_eval.add_argument(
-        "--tasks", nargs="+", choices=("P3a", "P3b", "P3c"), default=["P3a", "P3b", "P3c"]
+        "--tasks",
+        nargs="+",
+        choices=(
+            "P1a",
+            "P1b",
+            "P2a",
+            "P2b",
+            "P2c",
+            "P3a",
+            "P3b",
+            "P3c",
+            "P4a",
+            "P4b",
+            "P4c",
+        ),
+        default=["P3a", "P3b", "P3c"],
     )
     source_eval = skill_eval.add_mutually_exclusive_group(required=True)
     source_eval.add_argument("--checkpoint", type=Path)
@@ -147,7 +180,25 @@ def main() -> None:
     skill_eval.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command == "build-skills":
+        if args.command == "preview-maps":
+            from ather_exploration.training.config import read_training_config
+            from ather_exploration.ui.map_preview import MapPreview
+
+            config = read_training_config(args.config)
+            count = (
+                config.skills.train_count
+                if args.split == "train"
+                else config.skills.validation_count
+            )
+            if not config.skills.enabled or not 0 <= args.index < count:
+                raise ValueError(
+                    "Preview requires skills.enabled and an index inside the selected pool"
+                )
+            if args.task == "P4c" and not config.skills.p4.enabled:
+                raise ValueError("P4c requires skills.p4.enabled")
+            MapPreview(config, args.task, args.split, args.index).run()
+            return
+        elif args.command == "build-skills":
             from ather_exploration.training.config import read_training_config
             from ather_exploration.worlds.skill_tasks import build_skill_suite
 
@@ -184,6 +235,7 @@ def main() -> None:
                     or config.unfinished_trial
                     or config.p3_resume
                     or config.recovery
+                    or config.p4_transfer
                 ):
                     raise ValueError(
                         "train-check --resume requires an explicit skill transfer flag"
@@ -195,6 +247,12 @@ def main() -> None:
                 ):
                     raise ValueError("LR trial check requires only --resume")
                 transfer_check = {}
+                if config.p4_transfer:
+                    if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
+                        raise ValueError("P4 uses only --resume")
+                    from ather_exploration.training.p4_transfer import check_p4
+
+                    transfer_check = check_p4(args.resume, config)
                 if config.unfinished_trial:
                     if not args.resume or args.transfer_p1_to_p2 or args.transfer_p2_to_p3:
                         raise ValueError("Unfinished trial check requires only --resume")
@@ -279,6 +337,7 @@ def main() -> None:
                     str(args.checkpoint) if args.checkpoint else None,
                     not args.stochastic,
                     str(args.replay) if args.replay else None,
+                    args.diagnostic_source_mismatch,
                 ),
                 fps=args.fps,
                 checkpoint_dir=args.checkpoint_dir,

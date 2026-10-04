@@ -296,3 +296,119 @@ def test_probes_cover_all_training_strata(task):
         return tuple(map_group(p3_scenario(task, seed)).values())
 
     assert {group(s) for s in seeds} == {group(s) for s in pool}
+
+
+def test_balanced_samples_quota_shortage_and_dedup():
+    from ather_exploration.training.route_sampling import BalancedRouteSamples
+
+    sampler = BalancedRouteSamples(8)
+    for i in range(20):
+        obs = observation()
+        obs["state"][0] = i  # Ignored for map-state dedup.
+        sampler.offer(
+            obs,
+            np.array([1, 0, 0, 0, 0], bool),
+            disagreement=True,
+            ordinary=True,
+            source=("P3c", 0),
+        )
+    assert len(sampler.select()[0]) == 1
+    for i in range(1, 12):
+        obs = observation()
+        obs["memory"][0, 0, 0] = i
+        sampler.offer(
+            obs,
+            np.array([1, 0, 0, 0, 0], bool),
+            disagreement=i < 6,
+            ordinary=True,
+            source=("P3c", i),
+        )
+    rows, wrong = sampler.select()
+    assert len(rows) == 8 and wrong == 4
+    only = BalancedRouteSamples(32)
+    for i in range(40):
+        obs = observation()
+        obs["memory"][0, 0, 0] = i
+        only.offer(
+            obs,
+            np.array([1, 0, 0, 0, 0], bool),
+            disagreement=True,
+            ordinary=False,
+            source=("P3c", 7),
+        )
+    rows, wrong = only.select()
+    assert len(rows) == wrong == 16  # Same seed cannot fill the rollout.
+
+
+def test_p3c_branch_budget_persists_without_extension():
+    from dataclasses import asdict
+
+    controller = SkillController(index=7, phase_start=1572864, recovery_p3c_budget=262144)
+    controller.observe(False, 1572864 + 131072)
+    restored = SkillController(**asdict(controller))
+    assert restored.budget == 262144 and restored.phase_start == 1572864
+    restored.observe(False, 1835008)
+    assert restored.failed
+    passed = SkillController(index=7, phase_start=1572864, recovery_p3c_budget=262144)
+    passed.observe(True, 1572864 + 49152)
+    assert passed.observe(True, 1572864 + 65536)
+    assert passed.task == "P4a"
+
+
+def test_p3c_branch_keeps_reward_and_fixed_label_budget():
+    old = read_training_config("ather_exploration/resources/training/skills_p3_recovery.yaml")
+    new = read_training_config("ather_exploration/resources/training/skills_p3c_recovery.yaml")
+    assert new.skills == old.skills
+    assert new.recovery.route_coefficient == old.recovery.route_coefficient == 0.02
+    assert new.recovery.label_limit == old.recovery.label_limit == 256
+    assert new.recovery.parent_steps + new.recovery.additional_steps == 1835008
+
+
+def test_balanced_unaccepted_early_visit_can_be_labeled_later():
+    from ather_exploration.training.route_sampling import BalancedRouteSamples
+
+    sampler = BalancedRouteSamples(8)
+    obs = observation()
+    labels = np.array([1, 0, 0, 0, 0], bool)
+    sampler.offer(obs, labels, disagreement=False, ordinary=False, source=("P3c", 1))
+    assert not sampler.select()[0]
+    sampler.offer(obs, labels, disagreement=False, ordinary=True, source=("P3c", 1))
+    assert len(sampler.select()[0]) == 1
+
+
+def test_balanced_callback_does_not_discard_later_eligible_state(tmp_path):
+    from types import SimpleNamespace
+
+    from ather_exploration.training.route_sampling import BalancedRouteSamples
+    from ather_exploration.training.skill_runner import SkillCallback
+
+    config = read_training_config("ather_exploration/resources/training/skills_p3c_recovery.yaml")
+    cb = SkillCallback(config, tmp_path, SkillController(index=7), {})
+    cb.balanced_samples = BalancedRouteSamples(256)
+    obs = observation()
+
+    class Env:
+        def env_method(self, name):
+            return [[]]
+
+    policy = SimpleNamespace(
+        obs_to_tensor=lambda x: (x, True),
+        get_distribution=lambda x: SimpleNamespace(
+            distribution=SimpleNamespace(probs=torch.tensor([[0.9, 0.01, 0.07, 0.01, 0.01]]))
+        ),
+    )
+    cb.model = SimpleNamespace(
+        _last_obs={k: v[None] for k, v in obs.items()}, policy=policy, get_env=lambda: Env()
+    )
+    info = {
+        "route_revisited": True,
+        "route_eligible": False,
+        "route_seed": 1,
+        "route_source_task": "P3c",
+    }
+    cb.locals = {"infos": [info], "rewards": np.zeros(1)}
+    cb._on_step()
+    assert not cb.balanced_samples.select()[0]
+    info["route_eligible"] = True
+    cb._on_step()
+    assert len(cb.balanced_samples.select()[0]) == 1

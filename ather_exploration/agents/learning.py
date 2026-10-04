@@ -19,7 +19,7 @@ class ExplorationEncoder(BaseFeaturesExtractor):
         memory = observation_space["memory"].shape
         if (
             local[0] != 6
-            or memory not in ((11, 81, 81), (12, 81, 81))
+            or memory not in ((11, 81, 81), (12, 81, 81), (14, 81, 81), (16, 81, 81))
             or observation_space["state"].shape != (17,)
         ):
             raise ValueError("Incompatible symbolic observation shapes")
@@ -61,11 +61,27 @@ class ExplorationEncoder(BaseFeaturesExtractor):
 
 def schema_signature(space):
     return {
-        "version": 2 if space["memory"].shape[0] == 12 else 1,
+        "version": 4
+        if space["memory"].shape[0] == 16
+        else 3
+        if space["memory"].shape[0] == 14
+        else 2
+        if space["memory"].shape[0] == 12
+        else 1,
         "channels": {
             "local": list(LOCAL_CHANNELS),
             "memory": list(MEMORY_CHANNELS)
-            + (["frontier"] if space["memory"].shape[0] == 12 else []),
+            + (["frontier"] if space["memory"].shape[0] >= 12 else [])
+            + (
+                ["previous_monster_visible", "previous_visibility"]
+                if space["memory"].shape[0] >= 14
+                else []
+            )
+            + (
+                ["two_steps_ago_monster_visible", "two_steps_ago_visibility"]
+                if space["memory"].shape[0] == 16
+                else []
+            ),
             "state": list(STATE_FIELDS),
         },
         "shapes": {k: list(v.shape) for k, v in space.spaces.items()},
@@ -107,8 +123,20 @@ def build_model(config, env):
         if config.skills.enabled and config.skills.wall_mask
         else algorithm(config.method)
     )
+    if config.p4_transfer:
+        from ather_exploration.agents.route_ppo import RoutePPO
+
+        model_class = RoutePPO
+    policy = "MultiInputLstmPolicy" if recurrent else "MultiInputPolicy"
+    if config.p4_transfer and config.skills.p4.recovery:
+        from ather_exploration.agents.threat_policy import ThreatPolicy
+
+        policy = ThreatPolicy
+        policy_kwargs["threat_exploration"] = config.skills.p4.threat_exploration
+        if config.skills.p4.timing:
+            policy_kwargs["threat_mode"] = "temperature"
     return model_class(
-        "MultiInputLstmPolicy" if recurrent else "MultiInputPolicy",
+        policy,
         env,
         learning_rate=schedule,
         n_steps=config.n_steps,

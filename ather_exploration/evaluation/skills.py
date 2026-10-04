@@ -1,5 +1,7 @@
 """Frozen skill evaluation. No optimizer updates and no training RNG consumption."""
 
+from collections import defaultdict
+
 import numpy as np
 
 from ather_exploration.agents.learning import LearnedAgent
@@ -56,20 +58,79 @@ class SearchDiagnostics:
         }
 
 
+def p4_subgroup_success(task, rows):
+    """Deterministic success by encounter family or exact P4c patrol pattern."""
+    from ather_exploration.worlds.p4_tasks import ENCOUNTERS, P4C_PATTERNS
+
+    if task in ("P4a", "P4b"):
+        field = "encounter_family"
+        expected = ENCOUNTERS if task == "P4a" else ("doorway_crossing", "room_approach")
+    elif task == "P4c":
+        field = "patrol_families"
+        expected = P4C_PATTERNS
+    else:
+        raise ValueError("P4 subgroup metrics require P4a, P4b, or P4c")
+    groups = {}
+    for value in expected:
+        selected = [row for row in rows if row["deterministic"] and row[field] == value]
+        groups[value] = (
+            len(selected),
+            float(np.mean([row["success"] for row in selected])) if selected else 0.0,
+        )
+    return field, groups
+
+
+def p4_subgroup_gate_threshold(task, subgroup, config):
+    """Return the promotion threshold, or None when a subgroup is diagnostic-only."""
+    if task == "P4a":
+        gates = config.skills.p4.p4a_gates
+        if subgroup == "yield_alcoves" and not gates.gate_yield_subgroup:
+            return None
+        return gates.subgroup_success
+    return config.skills.p4.subgroup_success
+
+
 def evaluate_skill(model, task, config, *, agent=None, split="validation"):
     from ather_exploration.evaluation.p3 import ExplorationDiagnostics, add_p3_gates
     from ather_exploration.worlds.p3_tasks import map_group, p3_pool
+    from ather_exploration.worlds.p4_tasks import group as threat_group
 
     agent = agent if agent is not None else LearnedAgent(model, {})
+    is_p4 = config.skills.p4.enabled and task.startswith("P4")
+    timing_enabled = is_p4 and task == "P4a" and config.skills.p4.timing
+    if timing_enabled:
+        from ather_exploration.training.public_timing import public_p4a_timing
     is_p3 = task in ("P3a", "P3b", "P3c")
     if split not in ("validation", "ood") or (split == "ood" and not is_p3):
         raise ValueError("Choose validation or P3 OOD; heldout test is not a tuning split")
     pool = (
         p3_pool(task, config.skills.validation_count, split)
         if is_p3
-        else skill_pool(task, config.skills.validation_count, True)
+        else (
+            skill_pool(task, config.skills.validation_count, True, p4=True)
+            if config.skills.p4.enabled
+            else skill_pool(task, config.skills.validation_count, True)
+        )
     )
     rows = []
+
+    def empty_timing_counts():
+        return {
+            "labels": 0,
+            "wait_labels": 0,
+            "wait_follow": 0,
+            "go_labels": 0,
+            "go_follow": 0,
+            "exact_follow": 0,
+        }
+
+    timing_families = ("crossing", "bypass", "yield_alcoves") if timing_enabled else ()
+    timing_counts = {
+        mode: defaultdict(
+            empty_timing_counts, {family: empty_timing_counts() for family in timing_families}
+        )
+        for mode in ("deterministic", "stochastic")
+    }
     for seed, _ in pool:
         for deterministic in (True, False):
             for action_seed in range(1 if deterministic else 3):
@@ -96,16 +157,38 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                     actual_position = scenario.spawn
                     no_progress = longest_no_progress = 0
                     search = SearchDiagnostics(obs, floors)
-                    exploration = ExplorationDiagnostics(scenario, obs) if is_p3 else None
+                    exploration = (
+                        ExplorationDiagnostics(scenario, obs)
+                        if is_p3 or is_p4 and task != "P4a"
+                        else None
+                    )
                     initial_coverage = (
                         exploration.coverage
                         if exploration
                         else float(obs["memory"][2].sum()) / floors
                     )
                     for t in range(scenario.horizon):
+                        timing_label = None
+                        if timing_enabled:
+                            timing_label = public_p4a_timing(obs)
                         action, state = agent.act(
                             obs, state, deterministic=deterministic, action_rng=rng
                         )
+                        if timing_label is not None:
+                            from ather_exploration.worlds.p4_tasks import group as threat_group
+
+                            mode_name = "deterministic" if deterministic else "stochastic"
+                            family = threat_group(scenario)["encounter_family"]
+                            counts = timing_counts[mode_name][family]
+                            action = int(action)
+                            counts["labels"] += 1
+                            counts["exact_follow"] += int(timing_label["actions"][action])
+                            if timing_label["kind"] == "wait":
+                                counts["wait_labels"] += 1
+                                counts["wait_follow"] += int(action == 4)
+                            else:
+                                counts["go_labels"] += 1
+                                counts["go_follow"] += int(action != 4)
                         obs, _, term, trunc, info = env.step(action)
                         search.update(t + 1, obs, info["transition"])
                         actual_position = tuple(
@@ -156,9 +239,13 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                         exploration.room_coverage_min if exploration else tile_coverage
                     )
                     coverage_threshold = (
-                        config.skills.p3_gates.room_coverage
-                        if task in ("P3b", "P3c")
-                        else config.skills.p3_gates.coverage
+                        config.skills.p4.room_coverage
+                        if is_p4
+                        else (
+                            config.skills.p3_gates.room_coverage
+                            if task in ("P3b", "P3c", "P4b", "P4c")
+                            else config.skills.p3_gates.coverage
+                        )
                     )
                     coverage_auc = (
                         sum(coverage_history)
@@ -168,7 +255,13 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                         {
                             **search.row(),
                             **(exploration.row() if exploration else {}),
-                            **(map_group(scenario) if is_p3 else {}),
+                            **(
+                                map_group(scenario)
+                                if is_p3
+                                else threat_group(scenario)
+                                if is_p4
+                                else {}
+                            ),
                             "joint_success": float(success and coverage >= coverage_threshold),
                             "approach_efficiency": (
                                 approach_distance
@@ -216,6 +309,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             key: float(np.mean([r.get(key, 0.0) for r in selected]))
             for key in (
                 "success",
+                "joint_success",
                 "coverage",
                 "tile_coverage",
                 "room_coverage_min",
@@ -236,6 +330,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                 "reward_death",
                 "reward_intrinsic",
                 "reward_room_exploration",
+                "reward_completion_bonus",
                 "reward_step_cost",
                 "reward_wall_penalty",
                 "approach_efficiency",
@@ -256,7 +351,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             values = [r.get(key, 0.0) for r in selected if r[key] is not None]
             mode_summary[key] = float(np.mean(values)) if values else None
             mode_summary[f"{key}_count"] = len(values)
-        if task in ("P3", "P4b"):
+        if task in ("P3", "P4b", "P4c"):
             summary["deterministic" if mode else "stochastic"]["survival"] = float(
                 np.mean([r["survival"] for r in selected])
             )
@@ -286,6 +381,12 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
         "P4a": (0.85, 0.80),
         "P4b": (0.65, 0.65),
     }
+    if is_p4:
+        if task == "P4a":
+            gates = config.skills.p4.p4a_gates
+            thresholds[task] = (gates.deterministic_success, gates.stochastic_success)
+        else:
+            thresholds[task] = (config.skills.p4.success,) * 2
     if is_p3:
         thresholds[task] = (
             config.skills.p3_gates.success,
@@ -330,7 +431,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
                 0.10,
                 maximum=True,
             )
-    if task == "P4b":
+    if task == "P4b" and not is_p4:
         for m in summary:
             passed &= check(f"{m}/survival", summary[m]["survival"], 0.80)
     if task in ("P3", "P4a"):
@@ -341,9 +442,65 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             passed &= check(
                 f"{field}/{bucket}",
                 float(np.mean(values)) if values else 0.0,
-                0.70 if task == "P3" else 0.75,
+                0.70 if task == "P3" else config.skills.p4.p4a_gates.timing_bucket_success,
+            )
+    if is_p4 and task != "P4a":
+        g = config.skills.p4
+        for mode in summary:
+            passed &= check(f"{mode}/survival", summary[mode]["survival"], g.survival)
+        d = summary["deterministic"]
+        passed &= check("deterministic/coverage", d["coverage"], g.room_coverage)
+        passed &= check("deterministic/coverage_auc", d["coverage_auc"], g.coverage_auc)
+        passed &= check("deterministic/joint_success", d["joint_success"], g.joint)
+        passed &= check("deterministic/wall_block", d["wall_block"], 0.10, maximum=True)
+    if is_p4:
+        field, subgroup_rates = p4_subgroup_success(task, rows)
+        for value, (_, rate) in subgroup_rates.items():
+            label = "+".join(value) if isinstance(value, tuple) else value
+            threshold = p4_subgroup_gate_threshold(task, value, config)
+            if threshold is None:
+                continue
+            passed &= check(
+                f"subgroup/{field}/{label}/success",
+                rate,
+                threshold,
             )
     groups = {}
+    timing_adherence = {}
+    if timing_enabled:
+        for mode, families in timing_counts.items():
+            timing_adherence[mode] = {}
+            for family, counts in sorted(families.items()):
+                timing_adherence[mode][family] = {
+                    **counts,
+                    "wait_follow_rate": (
+                        counts["wait_follow"] / counts["wait_labels"]
+                        if counts["wait_labels"]
+                        else None
+                    ),
+                    "go_follow_rate": (
+                        counts["go_follow"] / counts["go_labels"] if counts["go_labels"] else None
+                    ),
+                    "exact_follow_rate": (
+                        counts["exact_follow"] / counts["labels"] if counts["labels"] else None
+                    ),
+                }
+    if is_p4:
+        for field in (
+            "size",
+            "monster_count",
+            "poi_count",
+            "encounter_family",
+            "patrol_families",
+            "patrol_lengths",
+        ):
+            for value in sorted({r[field] for r in rows}):
+                selected = [r for r in rows if r["deterministic"] and r[field] == value]
+                groups[f"{field}/{value}"] = {
+                    "count": len(selected),
+                    "success": float(np.mean([r["success"] for r in selected])),
+                    "death": float(np.mean([r["death"] for r in selected])),
+                }
     if is_p3:
         p3_passed, groups = add_p3_gates(task, rows, summary, check, config)
         passed &= p3_passed
@@ -353,7 +510,7 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
         "task": task,
         "validation_scope": "current_phase_only",
         "gate_status": "pilot_thresholds"
-        if task in ("P2b", "P2c", "P3a", "P3b", "P3c")
+        if task in ("P2b", "P2c", "P3a", "P3b", "P3c") or is_p4
         else "configured",
         "approach_reference": "evaluator-only geodesic distance at first sighting; failures zero",
         "efficiency_reference": "full-map shortest path from spawn; POI location is oracle",
@@ -363,14 +520,15 @@ def evaluate_skill(model, task, config, *, agent=None, split="validation"):
             else "first POI; discovery action included in before_seen coverage"
         ),
         "coverage_definition": (
-            "minimum per-room coverage and its time average for P3b/P3c; aggregate tile coverage for P3a"
-            if task in ("P3a", "P3b", "P3c")
+            "minimum per-room coverage and its time average for P3b/P3c/P4b/P4c; aggregate tile coverage for P3a"
+            if task in ("P3a", "P3b", "P3c") or is_p4 and task != "P4a"
             else "aggregate tile coverage"
         ),
         "passed": bool(passed),
         "checks": checks,
         "failed_checks": [c["name"] for c in checks if not c["passed"]],
         "summary": summary,
+        "timing_adherence": timing_adherence,
         "episodes": rows,
         "eval_steps": sum(r["steps"] for r in rows),
     }
