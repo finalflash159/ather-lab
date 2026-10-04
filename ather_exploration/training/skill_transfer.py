@@ -17,7 +17,14 @@ def _prepare_transfer(path, config, env, *, source_phase):
     _p3 = source_phase == "P2"
     parent, meta = inspect_checkpoint(path, transfer_p1_to_p2=not _p3, transfer_p2_to_p3=_p3)
     old, new = meta["config"], config.model_dump(mode="json")
-    old = {"lr_trial": None, "p3_restart": False, "p4_transfer": False, **old}
+    old = {
+        "lr_trial": None,
+        "p3_restart": False,
+        "p4_transfer": False,
+        "p4_lr_branch": False,
+        "p4_force_advance": False,
+        **old,
+    }
     old = {
         **old,
         "skills": {

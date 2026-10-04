@@ -27,6 +27,10 @@ class RouteMemory:
         self.initialized = False
         self.aux_updates = 0
 
+    @staticmethod
+    def observation_digest(observation):
+        return hashlib.sha256(observation["memory"].tobytes()).digest()
+
     def offer(self, observation, labels, source, origin):
         if origin not in ("teacher", "learner"):
             raise ValueError("Unknown teaching origin")
@@ -34,7 +38,7 @@ class RouteMemory:
         if key not in self.buckets and len(self.buckets) >= 1024:
             raise ValueError("Teaching memory map capacity exceeded")
         bucket = self.buckets.setdefault(key, [])
-        digest = hashlib.sha256(observation["memory"].tobytes()).digest()
+        digest = self.observation_digest(observation)
         if any(item[0] == digest for item in bucket):
             return
         self.counts[key] = self.counts.get(key, 0) + 1

@@ -37,7 +37,17 @@ def resolve_checkpoint(path):
 
 
 # UI accounting-only compatibility; environment/policy/training semantics unchanged.
-VIEWER_COMPATIBLE_SOURCES = {"4859629ea0a94f3a1e17e1a331283f799a325a6a6889d85543e4b72c934ae1f3"}
+VIEWER_COMPATIBLE_SOURCES = {
+    # Route-level timing labels and training telemetry do not change inference.
+    "e6410e4b9023cea28f2a85f280bdda485c738069439ef25a05b3c0e76a55412d",
+    # Timing v4: LR branch changes continuation only, not historical inference.
+    "ddc453e5b1bdf88cb70d72e5c1c73b5f744c60097e7d4046d0d6ccc078ea95ba",
+    # v3 keeps its original mixture distribution and lesson behavior when timing=False.
+    "d85ed5d8f88e76278abd77d2c1ca2ed2f6f1906e34fedca5063e979324325858",
+    "4859629ea0a94f3a1e17e1a331283f799a325a6a6889d85543e4b72c934ae1f3",
+    # Audited P4 v2: default history=1 and reward=0 preserve old inference.
+    "2b3dbf07e8a67a65749954938418dd2bd6a3a4ec831caffe1ecc4d592c8860fd",
+}
 
 
 def inspect_checkpoint(
@@ -50,7 +60,13 @@ def inspect_checkpoint(
     unfinished_trial=False,
     p3_resume=False,
     recovery=False,
+    diagnostic_source_mismatch=False,
+    forced_p4_branch=False,
 ):
+    if diagnostic_source_mismatch and not inference:
+        raise ValueError("Diagnostic source mismatch is permitted only for inference")
+    if forced_p4_branch and not inference:
+        raise ValueError("Forced P4 checkpoint compatibility requires inference validation")
     path = resolve_checkpoint(path)
     if not (path / "READY").is_file():
         raise ValueError("Checkpoint is not READY")
@@ -94,6 +110,22 @@ def inspect_checkpoint(
             inference
             and meta.get("source_revision")
             == "17e3e864172cc7cd52e2a70cc6b293258192b0f39b9d748aa643e4de790797c8"
+        )
+        and not (
+            diagnostic_source_mismatch
+            and inference
+            and meta.get("source_revision")
+            == "1954d1c44e80c66da92d538811d0de6a0cdb32799086d292df516aed48e7dd82"
+            and meta.get("viewer_task") == "P4a"
+            and meta.get("schema", {}).get("version") == 4
+        )
+        and not (
+            forced_p4_branch
+            and inference
+            and meta.get("source_revision")
+            == "1954d1c44e80c66da92d538811d0de6a0cdb32799086d292df516aed48e7dd82"
+            and meta.get("viewer_task") == "P4a"
+            and meta.get("schema", {}).get("version") == 4
         )
         and not (transfer_p1_to_p2 and meta.get("source_revision") == P1_TRANSFER_SOURCE)
         and not (
@@ -149,7 +181,9 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
             "artifact_schema": "g4-checkpoint-v1",
             "method": config.method,
             "learning_objective": (
-                "ppo_temporal_threat_with_safe_retention"
+                "ppo_public_timing_with_safe_retention"
+                if config.p4_transfer and config.skills.p4.timing
+                else "ppo_temporal_threat_with_safe_retention"
                 if config.p4_transfer
                 else "ppo_separate_public_teaching"
                 if config.recovery and config.recovery.sampling == "aggregated_teaching"
@@ -206,8 +240,14 @@ def save_checkpoint(model, directory, config, runner_state, bank_ids):
     return meta
 
 
-def load_agent(path, observation_space, *, device="cpu"):
-    path, meta = inspect_checkpoint(path, inference=True)
+def load_agent(
+    path, observation_space, *, device="cpu", diagnostic_source_mismatch=False
+):
+    path, meta = inspect_checkpoint(
+        path,
+        inference=True,
+        diagnostic_source_mismatch=diagnostic_source_mismatch,
+    )
     if schema_signature(observation_space) != meta["schema"]:
         raise ValueError("Checkpoint observation/action schema incompatible with environment")
     from sb3_contrib import MaskablePPO

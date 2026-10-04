@@ -68,11 +68,42 @@ class P3GateConfig(FrozenConfig):
     wall_block: float = Field(default=0.10, ge=0, le=1)
 
 
+class P4aGateConfig(FrozenConfig):
+    """Exploratory P4a promotion criteria; timing-follow remains diagnostic only."""
+
+    deterministic_success: float = Field(default=0.85, ge=0, le=1)
+    stochastic_success: float = Field(default=0.80, ge=0, le=1)
+    timing_bucket_success: float = Field(default=0.75, ge=0, le=1)
+    subgroup_success: float = Field(default=0.50, ge=0, le=1)
+    gate_yield_subgroup: bool = True
+
+
 class P4Config(FrozenConfig):
+    # Defaults preserve old checkpoint inference; recovery is explicitly opted in.
+    history_frames: Literal[1, 2] = 1
+    recovery: bool = False
+    timing: bool = False
+    timing_batches: int = Field(default=4, ge=1, le=8)
+    timing_coefficient: float = Field(default=0.1, gt=0, le=1, allow_inf_nan=False)
+    step_cost: float = Field(default=0.0, ge=0, le=0.01, allow_inf_nan=False)
+    # P4 must not inherit P3's hidden room-label shaping. The terminal bonus
+    # fires only when all POIs are activated and the agent survives to horizon.
+    room_exploration: float = Field(default=0.0, ge=0, le=2.0, allow_inf_nan=False)
+    success_bonus: float = Field(default=1.0, ge=0, le=3.0, allow_inf_nan=False)
+    retention_batches: int = Field(default=4, ge=1, le=8)
+    retention_max_kl: float = Field(default=0.01, gt=0, le=0.1, allow_inf_nan=False)
+    threat_exploration: float = Field(default=0.1, ge=0, le=0.2, allow_inf_nan=False)
+    exploration_decay_steps: int = Field(default=131072, ge=16384)
     enabled: bool = False
+    worker_quota: bool = False
+    balanced_families: bool = False
+    p4a_gates: P4aGateConfig = Field(default_factory=P4aGateConfig)
+    soften_actor: bool = False
+    teaching_batches: int = Field(default=8, ge=0, le=8)
     task_budget: int = Field(default=1048576, ge=65536)
     minimum: int = Field(default=65536, ge=32768)
     success: float = Field(default=0.75, ge=0, le=1)
+    subgroup_success: float = Field(default=0.50, ge=0, le=1)
     survival: float = Field(default=0.85, ge=0, le=1)
     joint: float = Field(default=0.65, ge=0, le=1)
     room_coverage: float = Field(default=0.50, ge=0, le=1)
@@ -177,6 +208,8 @@ class TrainingConfig(FrozenConfig):
     p3_resume: P3ResumeConfig | None = None
     recovery: RecoveryConfig | None = None
     p4_transfer: bool = False
+    p4_lr_branch: bool = False
+    p4_force_advance: bool = False
     seed: int = Field(default=0, ge=0, lt=2**32)
     total_timesteps: int = Field(default=4096, gt=0)
     n_envs: int = Field(default=1, gt=0, le=64)
@@ -199,7 +232,43 @@ class TrainingConfig(FrozenConfig):
     @model_validator(mode="after")
     def coherent(self):
         rollout = self.n_envs * self.n_steps
+        if self.p4_lr_branch and (
+            not self.p4_transfer
+            or not self.skills.p4.timing
+            or self.learning_rate != 0.0002
+            or self.final_learning_rate != 0.0002
+        ):
+            raise ValueError(
+                "P4 LR branch requires timing transfer and constant learning rate 2e-4"
+            )
+        if self.p4_force_advance and not self.p4_transfer:
+            raise ValueError("Forced P4 continuation requires explicit P4 transfer")
+        if self.p4_force_advance and self.p4_lr_branch:
+            raise ValueError("Forced P4 continuation and LR branching are separate protocols")
+        if self.skills.p4.timing and not self.skills.p4.recovery:
+            raise ValueError("Timing teaching requires P4 recovery")
+        if self.skills.p4.balanced_families and (
+            not self.skills.p4.timing
+            or not self.skills.p4.worker_quota
+            or not self.p4_transfer
+            or self.skills.p4.history_frames != 2
+        ):
+            raise ValueError("Balanced P4a requires timing transfer, quota and two history frames")
+        if self.skills.p4.recovery and not self.p4_transfer:
+            raise ValueError("P4 recovery requires explicit P4 transfer")
         if self.p4_transfer:
+            if self.skills.p4.recovery and (
+                self.skills.p4.history_frames != 2
+                or not self.skills.p4.worker_quota
+                or self.skills.p4.soften_actor
+                or self.skills.p4.teaching_batches
+                or self.skills.train_count < 64
+            ):
+                raise ValueError(
+                    "P4 recovery requires two history frames, quota, >=64 maps and no actor scaling/route teaching"
+                )
+            if self.skills.p4.worker_quota and self.n_envs % 8:
+                raise ValueError("P4 worker quota requires n_envs divisible by 8")
             if (
                 not self.skills.enabled
                 or not self.skills.p4.enabled
@@ -220,9 +289,17 @@ class TrainingConfig(FrozenConfig):
                 self.skills.p4.minimum > self.skills.p4.task_budget
                 or self.skills.p4.task_budget % self.skills.eval_interval
                 or self.skills.p4.minimum % self.skills.eval_interval
-                or self.total_timesteps < 1638400 + 3 * self.skills.p4.task_budget
+                or self.total_timesteps
+                < 1638400
+                + (
+                    self.skills.p4.minimum
+                    if self.skills.p4.recovery
+                    else 3 * self.skills.p4.task_budget
+                )
             ):
-                raise ValueError("P4 budgets must cover all three stages and align evaluation")
+                raise ValueError(
+                    "P4 budgets must cover the configured minimum and align evaluation"
+                )
         if self.skills.p4.enabled and not self.p4_transfer:
             raise ValueError("P4 design requires explicit audited transfer")
         if self.recovery:

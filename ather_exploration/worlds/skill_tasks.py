@@ -191,6 +191,7 @@ class SkillEnv(gym.Wrapper):
         visit_bonus=0.002,
         visit_cap=0.10,
         room_exploration=0.0,
+        success_bonus=0.0,
         scenario_override=None,
         all_pois_required=False,
     ):
@@ -216,6 +217,7 @@ class SkillEnv(gym.Wrapper):
         self.first_visit = first_visit
         self.visit_bonus, self.visit_cap = visit_bonus, visit_cap
         self.room_exploration = room_exploration
+        self.success_bonus = success_bonus
         self.step_cost = step_cost
         self.wall_penalty = wall_penalty
         self.finished = False
@@ -291,6 +293,9 @@ class SkillEnv(gym.Wrapper):
             completed_pois and alive and (early_phase or snap.step_count == core.scenario.horizon)
         )
         early = success and early_phase
+        completion_bonus = (
+            self.success_bonus if success and self.phase in ("P4b", "P4c") else 0.0
+        )
         self.finished = bool(terminated or truncated or early)
         info = {
             **info,
@@ -308,6 +313,7 @@ class SkillEnv(gym.Wrapper):
                     "death": -core.reward_config.death * e["died"],
                     "intrinsic": bonus,
                     "room_exploration": room_bonus,
+                    "completion_bonus": completion_bonus,
                     "step_cost": -self.step_cost,
                     "wall_penalty": -wall_cost,
                 },
@@ -316,7 +322,7 @@ class SkillEnv(gym.Wrapper):
         }
         return (
             obs,
-            reward + bonus + room_bonus - self.step_cost - wall_cost,
+            reward + bonus + room_bonus + completion_bonus - self.step_cost - wall_cost,
             bool(terminated or early),
             truncated,
             info,
@@ -327,7 +333,7 @@ def make_skill_env(task, seed, reward=None, first_visit=False, step_cost=0.0, *,
     return SkillEnv(task, seed, reward, first_visit, step_cost, phase=phase)
 
 
-def _configured_skill_env(task, seed, skills, *, phase=None):
+def _configured_skill_env(task, seed, skills, *, phase=None, threat_lesson=None):
     """Sample geometry by task; apply the active phase objective in every caller.
 
     Phase is environment configuration only, never a policy observation.
@@ -337,6 +343,11 @@ def _configured_skill_env(task, seed, skills, *, phase=None):
         from ather_exploration.worlds.p4_tasks import p4_scenario
 
         p3 = skills.p3_reward
+        scenario = p4_scenario(task, seed)
+        if threat_lesson is not None:
+            from ather_exploration.training.threat_lessons import lesson_scenario
+
+            scenario = lesson_scenario(scenario, threat_lesson, timing=skills.p4.timing)
         return SkillEnv(
             task,
             seed,
@@ -348,11 +359,13 @@ def _configured_skill_env(task, seed, skills, *, phase=None):
             ),
             phase=phase,
             wall_penalty=p3.wall_penalty,
-            room_exploration=0.0 if phase == "P4a" else p3.room_exploration,
+            room_exploration=skills.p4.room_exploration if phase != "P4a" else 0.0,
+            success_bonus=skills.p4.success_bonus,
             first_visit=phase != "P4a" and skills.p3_visit_bonus > 0,
             visit_bonus=skills.p3_visit_bonus,
             visit_cap=skills.p3_visit_cap,
-            scenario_override=p4_scenario(task, seed),
+            scenario_override=scenario,
+            step_cost=skills.p4.step_cost,
             all_pois_required=True,
         )
     reward = RewardConfig(activation=skills.activation, death=skills.death)
@@ -395,7 +408,7 @@ def _configured_skill_env(task, seed, skills, *, phase=None):
             phase=phase,
             wall_penalty=p3.wall_penalty,
             horizon=skills.p3_horizon,
-            room_exploration=p3.room_exploration,
+            room_exploration=0.0 if skills.p4.enabled else p3.room_exploration,
         )
     return make_skill_env(task, seed, reward, skills.first_visit, phase=phase)
 
@@ -447,7 +460,7 @@ def build_skill_suite(config, output):
     manifest = {
         "state": "BUILDING",
         "source_revision": implementation_id(),
-        "version": 5 if config.skills.p4.enabled else 4,
+        "version": 6 if config.skills.p4.recovery else 5 if config.skills.p4.enabled else 4,
         "tasks": {},
     }
     write_record(root / "manifest.json", manifest)
@@ -476,6 +489,10 @@ def build_skill_suite(config, output):
                             },
                         )
             print(f"[skills-bank] {task}: train={len(train)} validation={len(val)}", flush=True)
+        if config.skills.p4.recovery:
+            from ather_exploration.training.threat_lessons import export_lessons
+
+            manifest["encounter_lessons"] = export_lessons(config, root)
         manifest["state"] = "READY"
         write_record(root / "manifest.json", manifest, replace=True)
     except BaseException:
@@ -485,8 +502,8 @@ def build_skill_suite(config, output):
     return manifest
 
 
-def configured_skill_env(task, seed, skills, *, phase=None):
-    env = _configured_skill_env(task, seed, skills, phase=phase)
+def configured_skill_env(task, seed, skills, *, phase=None, threat_lesson=None):
+    env = _configured_skill_env(task, seed, skills, phase=phase, threat_lesson=threat_lesson)
     if skills.frontier:
         from ather_exploration.environment.frontier import FrontierObservation
 
@@ -494,5 +511,5 @@ def configured_skill_env(task, seed, skills, *, phase=None):
     if skills.p4.enabled:
         from ather_exploration.environment.threat_history import ThreatHistory
 
-        env = ThreatHistory(env)
+        env = ThreatHistory(env, frames=skills.p4.history_frames)
     return env

@@ -25,9 +25,13 @@ class SkillController:
     p3_task_budget: int = 524288
     recovery_p3b_budget: int | None = None
     recovery_p3c_budget: int | None = None
+    threat_level: int = 0
+    threat_streak: int = 0
+    threat_level_start: int = 1638400
     p4_enabled: bool = False
     p4_task_budget: int = 1048576
     p4_minimum: int = 65536
+    p4_force_advance: bool = False
 
     def observe_restart(self, level, progress, window, rate):
         """Public novelty mastery; separate from validation gate and task promotion."""
@@ -106,6 +110,14 @@ class SkillController:
             if self.task.startswith(("P2", "P3")) or self.p4_enabled and self.task.startswith("P4")
             else steps - self.family_start
         ) >= budget
+        if self.p4_force_advance and self.task == "P4b" and self.failed:
+            self.history[-1]["forced_advance"] = "budget_exhausted_after_gate_failure"
+            self.index += 1
+            self.phase_start = steps
+            self.family_start = steps
+            self.passed = 0
+            self.failed = False
+            return True
         return False
 
     def mixture(self):

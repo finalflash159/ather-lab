@@ -1,8 +1,8 @@
-# Audited transfer from completed P3c step_1638400; no automatic training.
+# Balanced full-P4 branch from audited P3c step_1638400.
 method: ppo
 seed: 0
-# Parent 1,638,400 + shared branch budget 1,048,576 new transitions.
-total_timesteps: 2686976
+# Parent 1,638,400 + up to 1,048,576 for each of P4a/P4b/P4c.
+total_timesteps: 4784128
 n_envs: 16
 n_steps: 256
 batch_size: 1024
@@ -71,6 +71,13 @@ skills:
     enabled: true
     worker_quota: true
     balanced_families: true
+    # Exploratory P4a thresholds: keep yield visible in reports, not as a promotion gate.
+    p4a_gates:
+      deterministic_success: 0.50
+      stochastic_success: 0.50
+      timing_bucket_success: 0.50
+      subgroup_success: 0.30
+      gate_yield_subgroup: false
     # Per-task cap is also bounded by the shared remaining branch budget.
     history_frames: 2
     recovery: true
@@ -88,6 +95,7 @@ skills:
     task_budget: 1048576
     minimum: 65536
     success: 0.75
+    subgroup_success: 0.50
     survival: 0.85
     joint: 0.65
     room_coverage: 0.5

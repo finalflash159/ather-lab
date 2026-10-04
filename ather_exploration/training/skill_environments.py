@@ -24,7 +24,9 @@ class SkillTrainingEnv(gym.Env):
         if config.skills.p4.enabled:
             from ather_exploration.environment.threat_history import threat_space
 
-            self.observation_space = threat_space(self.observation_space)
+            self.observation_space = threat_space(
+                self.observation_space, config.skills.p4.history_frames
+            )
         self.action_space = gym.spaces.Discrete(5)
         self.rng = stage_rng(config.seed, "skill-worker", worker)
         self.controller = SkillController()
@@ -92,8 +94,14 @@ class SkillTrainingEnv(gym.Env):
             self.env.close()
         mix = self.controller.mixture()
         self.phase = self.controller.task
-        self.task = str(self.rng.choice([x[0] for x in mix], p=[x[1] for x in mix]))
+        if self.config.skills.p4.worker_quota and self.phase.startswith("P4"):
+            from ather_exploration.training.threat_training import worker_source
+
+            self.task = worker_source(self.phase, self.worker, self.config.n_envs)
+        else:
+            self.task = str(self.rng.choice([x[0] for x in mix], p=[x[1] for x in mix]))
         self.serial += 1
+        self.encounter_family = None
         self.total = 0.0
         self.intrinsic_total = 0.0
         self.actions = [0] * 5
@@ -127,6 +135,25 @@ class SkillTrainingEnv(gym.Env):
             task_seed = skill_pool(
                 self.task, self.config.skills.train_count, p4=self.config.skills.p4.enabled
             )[int(self.rng.integers(self.config.skills.train_count))][0]
+            lesson = None
+            if self.config.skills.p4.recovery and self.task == "P4a" and self.phase == "P4a":
+                if self.config.skills.p4.balanced_families:
+                    from ather_exploration.training.threat_lessons import family_train_seeds
+                    from ather_exploration.training.threat_training import p4a_worker_family
+
+                    family = p4a_worker_family(self.worker, self.config.n_envs)
+                    seeds = family_train_seeds(self.config.skills.train_count, family)
+                    self.encounter_family = family
+                    # Each family starts with both an approach lesson and full maps.
+                    lesson = 0 if family == "crossing" and self.worker % 2 == 0 else (
+                        2 if family == "yield_alcoves" and self.worker % 2 == 0 else 3
+                    )
+                else:
+                    from ather_exploration.training.threat_lessons import lesson_seeds
+
+                    lesson = self.controller.threat_level
+                    seeds = lesson_seeds(self.config.skills.train_count, lesson, probe=False)
+                task_seed = int(self.rng.choice(seeds))
             item = None
             if self.archive and self.phase in ("P3b", "P3c"):
                 if self.config.p3_resume or self.config.recovery:
@@ -140,6 +167,7 @@ class SkillTrainingEnv(gym.Env):
                 self.task,
                 self.task_seed,
                 self.config.skills,
+                threat_lesson=lesson,
                 phase=(
                     "P3c" if self.config.skills.p4.enabled and self.task == "P3c" else self.phase
                 ),
@@ -203,6 +231,9 @@ class SkillTrainingEnv(gym.Env):
         before = self.last_obs
         obs, r, term, trunc, info = self.env.step(action)
         if self.config.p4_transfer:
+            info["source_task"] = self.task
+            if self.encounter_family is not None:
+                info["encounter_family"] = self.encounter_family
             info["teaching_safe_source"] = (
                 self.task == "P3c" and not self.env.unwrapped.scenario.routes
             )
@@ -403,7 +434,7 @@ def skill_identity(config):
     return {
         "skills": digest(
             {
-                "version": 5 if config.skills.p4.enabled else 4,
+                "version": 7 if config.skills.p4.recovery else 6 if config.skills.p4.enabled else 4,
                 "train_count": config.skills.train_count,
                 "validation_count": config.skills.validation_count,
                 "split": "legacy_content_mod5+p3_terrain_dihedral_mod10",

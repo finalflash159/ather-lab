@@ -1,7 +1,7 @@
-# Audited transfer from completed P3c step_1638400; no automatic training.
+# Explicit LR continuation from skills-p4-timing-01 step_1703936.
 method: ppo
 seed: 0
-# Parent 1,638,400 + shared branch budget 1,048,576 new transitions.
+# Parent 1,703,936 + remaining shared P4 budget 983,040 transitions.
 total_timesteps: 2686976
 n_envs: 16
 n_steps: 256
@@ -10,8 +10,8 @@ n_epochs: 4
 gamma: 0.999
 gae_lambda: 0.95
 ent_coef: 0.01
-learning_rate: 0.0001
-final_learning_rate: 0.0001
+learning_rate: 0.0002
+final_learning_rate: 0.0002
 device: cpu
 vec_backend: subproc
 torch_threads: 1
@@ -70,7 +70,6 @@ skills:
   p4:
     enabled: true
     worker_quota: true
-    balanced_families: true
     # Per-task cap is also bounded by the shared remaining branch budget.
     history_frames: 2
     recovery: true
@@ -78,8 +77,6 @@ skills:
     timing_batches: 4
     timing_coefficient: 0.1
     step_cost: 0.002
-    room_exploration: 0.0
-    success_bonus: 1.0
     retention_batches: 4
     retention_max_kl: 0.01
     # No uniform mixture or step-based exploration decay in timing mode.
@@ -100,3 +97,4 @@ tracking:
   mode: online
   project: ather-exploration
 p4_transfer: true
+p4_lr_branch: true

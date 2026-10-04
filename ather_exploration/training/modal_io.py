@@ -143,6 +143,8 @@ def download_run(volume, run_id, output):
             "resume_events.jsonl",
             "skill_evaluations.jsonl",
             "phase_transitions.jsonl",
+            "threat_lessons.jsonl",
+            "retention_evaluations.jsonl",
         ):
             if f"runs/{run_id}/{name}" not in available:
                 continue

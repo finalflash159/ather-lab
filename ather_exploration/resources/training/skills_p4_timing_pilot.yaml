@@ -1,8 +1,8 @@
-# Audited transfer from completed P3c step_1638400; no automatic training.
+# Helper-escape diagnostic from P3c step_1638400. Never allocates PPO steps to P4b/c.
 method: ppo
 seed: 0
-# Parent 1,638,400 + shared branch budget 1,048,576 new transitions.
-total_timesteps: 2686976
+# Parent 1,638,400 + 65,536 new transitions (four validation intervals).
+total_timesteps: 1703936
 n_envs: 16
 n_steps: 256
 batch_size: 1024
@@ -78,14 +78,12 @@ skills:
     timing_batches: 4
     timing_coefficient: 0.1
     step_cost: 0.002
-    room_exploration: 0.0
-    success_bonus: 1.0
     retention_batches: 4
     retention_max_kl: 0.01
     # No uniform mixture or step-based exploration decay in timing mode.
     soften_actor: false
     teaching_batches: 0
-    task_budget: 1048576
+    task_budget: 65536
     minimum: 65536
     success: 0.75
     survival: 0.85
