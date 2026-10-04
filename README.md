@@ -6,7 +6,7 @@ The skill curriculum adds PPO tasks P1–P5: approach visible POIs, navigate obs
 
 ## Setup and checks
 
-Use Python 3.11 and the locked CPU dependencies locally:
+Use Python 3.11 and the locked CPU dependencies locally. The main pinned runtime versions are Gymnasium 1.3.0, PyTorch 2.11.0, Stable-Baselines3 2.9.0 and sb3-contrib 2.9.0; `uv.lock` pins the full environment. MiniGrid 3.1.0's source is included under `minigrid/` and is installed by the project environment; no second MiniGrid checkout is needed.
 
 ```bash
 uv sync --locked --extra cpu --extra modal
@@ -35,7 +35,7 @@ The second command **trains**. Configure W&B credentials or set tracking mode to
 .venv/bin/python -m ather_exploration train-check --config ather_exploration/resources/training/skills_p3.yaml --resume artifacts/modal/skills-p2-02-resume-01/checkpoints/step_376832 --transfer-p2-to-p3
 ```
 
-For training, supply `--transfer-p2-to-p3`, `--continue-curriculum` and the same parent checkpoint with a new output/run ID. Modal accepts the same flags. Upload a fresh dataset for the changed source. `evaluate-skills --help` exposes frozen validation/OOD evaluation for learned policies and baselines; it never trains. These are pilot gates, not demonstrated learning results.
+For training, supply `--transfer-p2-to-p3`, `--continue-curriculum` and the same parent checkpoint with a new output/run ID. Modal accepts the same flags. Upload a fresh dataset for the changed source. `evaluate-skills` supports P1–P4 validation and P3 OOD evaluation for a checkpoint or a baseline; it never trains. These are pilot gates, not demonstrated learning results.
 
 ## P2 continuation
 
@@ -49,16 +49,121 @@ For the audited legacy P1 source, use `--transfer-p1-to-p2` together with `--res
 
 Modal supports the same transfer flag for `--command check` and `--command train`; remote paths use `RUN_ID/checkpoints/step_N`. Check mode also requires `--continue-curriculum`. Transfer validates the parent integrity, source allowlist, completed phase, observation/action schema, network architecture, optimizer and counters. It preserves weights/optimizer/schedule and resets episodes. `transfer.json` and checkpoint metadata record provenance. Ordinary resume/inference retain strict source checks. Upload a fresh dataset after Python source changes. Tests simulate training boundaries without optimizer updates.
 
-## Modal and inference
+## Evaluation
 
-Use `python -m ather_exploration.training.modal_io upload --help` to upload datasets and `python -m modal run -m ather_exploration.training.modal_app --help` for remote check/train. Substitute `.venv/bin/python` for `python` in your shell. Upload returns the dataset ID to use; do not reuse an unrelated example ID. Training is headless. Download a finished run with:
+Build a development bank with distinct train, validation-selection and held-out map splits. `count` is the number of maps **per split**. Choose a fresh output path for each immutable bank:
 
 ```bash
-.venv/bin/python -m ather_exploration.training.modal_io download --run-id YOUR_RUN_ID --output artifacts/modal/YOUR_RUN_ID
-.venv/bin/python -m ather_exploration ui --checkpoint-dir artifacts/modal/YOUR_RUN_ID
+.venv/bin/python -m ather_exploration build-suite \
+  --preset large --root-seed 4401 --count 16 --train-starts 1 \
+  --output artifacts/banks/eval-large-4401
 ```
 
-The viewer offers checkpoint selection, new map and reset. Skill checkpoints select their task automatically. Config and experiment setup stay in CLI/YAML; metrics are logged to W&B and local files.
+Compare the random and deterministic frontier baselines on the same held-out maps:
+
+```bash
+.venv/bin/python -m ather_exploration evaluate \
+  --agents random frontier --bank artifacts/banks/eval-large-4401 \
+  --split heldout_id --action-repeats 3 --root-seed 0 \
+  --output artifacts/evaluations/baselines-large-4401
+```
+
+The random baseline samples actions without wall masking. The frontier baseline uses public memory, routes over known floor toward a pending POI or frontier, and uses deterministic tie-breaking. Neither receives hidden map cells, hidden POIs, or hidden monster routes. In bank mode, each requested agent uses the same recorded scenario/start; random gets the requested action repeats. These commands are development evaluation, not by themselves a multi-training-seed final result.
+
+Evaluate a checkpoint trained for the **same main environment observation/action schema** on that same held-out bank:
+
+```bash
+.venv/bin/python -m ather_exploration evaluate-policy \
+  --checkpoint artifacts/runs/RUN_ID/checkpoints/step_123456 \
+  --bank artifacts/banks/eval-large-4401 --split heldout_id \
+  --output artifacts/evaluations/policy-large-4401
+```
+
+`evaluate-policy` writes `status.json`, `summary.json`, per-episode and per-step JSONL, and replay files. `evaluate` writes a manifest, scenario records, episode/step JSONL and summary. Use `validation_selection` while making choices and reserve `heldout_id` for the final report. Do not compare on different banks or split records. A checkpoint with a skill-specific observation schema (for example P4's 16-channel policy) is not a main-environment checkpoint; use the skill evaluator below.
+
+Evaluate skill checkpoints or public-information baselines on their fixed validation pools:
+
+```bash
+CONFIG=ather_exploration/resources/training/skills_p4_balanced.yaml
+CHECKPOINT=artifacts/modal/RUN_ID/checkpoints/step_2000000
+.venv/bin/python -m ather_exploration evaluate-skills \
+  --config "$CONFIG" --tasks P4a P4b P4c \
+  --checkpoint "$CHECKPOINT" --split validation \
+  --output artifacts/evaluations/p4-validation-RUN_ID.json
+```
+
+For a diagnostic subset use `--count 4`; omit it to evaluate the configured validation count (64 maps, one deterministic and three stochastic episodes per map/task). To run the same task suite with a baseline, replace `--checkpoint "$CHECKPOINT"` with `--agent frontier` or `--agent random`. This writes one JSON result with the fixed pool's metrics and gate results; it does not train or select a checkpoint. `evaluate-skills` offers P3 OOD maps only; P4 has train/validation pools but no separate held-out P4 pool yet. P4's training-time gates use validation maps and must not be presented as held-out final evidence. The P4 gate thresholds are exploratory pilot settings.
+
+## Inference, replay and map review
+
+Download a finished Modal run and open its checkpoint viewer:
+
+```bash
+.venv/bin/python -m ather_exploration.training.modal_io download \
+  --run-id RUN_ID --output artifacts/modal/RUN_ID
+.venv/bin/python -m ather_exploration ui \
+  --checkpoint-dir artifacts/modal/RUN_ID --seed 42 --fps 8
+```
+
+The viewer has a checkpoint dropdown, auto-plays the selected policy, `New map` advances to the next seed, and `Reset same map` replays the current seed. Skill checkpoints select their task from checkpoint metadata. For a single checkpoint use `--checkpoint PATH`; for a no-training smoke test use `--agent frontier --seed 42`. `--stochastic` enables sampled actions. Close the window to stop the viewer; this never affects a finished training run.
+
+To inspect the exact generated skill maps before or after training, open the separate dataset preview:
+
+```bash
+.venv/bin/python -m ather_exploration preview-maps \
+  --config ather_exploration/resources/training/skills_p4_balanced.yaml \
+  --task P4a --split validation --index 0
+```
+
+The preview UI lets you choose P1a–P4c, train or validation, and a zero-based map index; it shows the full map and hidden patrol routes, so this is a privileged generator/debug view, not agent input or inference. `Reset` sets patrol time to zero; `Play patrol` and `Tick +1` animate the route without simulating agent actions or collisions. This preview command does not show P5 target-bank maps.
+
+`evaluate-policy` output contains exact scenarios and replay traces. Verify and render one recorded episode with:
+
+```bash
+.venv/bin/python -m ather_exploration replay \
+  --file artifacts/evaluations/policy-large-4401/replays/0.json
+.venv/bin/python -m ather_exploration ui --agent replay \
+  --replay artifacts/evaluations/policy-large-4401/replays/0.json --fps 8
+```
+
+Local training writes to the directory passed to `train`; its checkpoints are under `OUTPUT/checkpoints/step_N`. After Modal download, use `artifacts/modal/RUN_ID/checkpoints/step_N`. A `READY` checkpoint is loadable without retraining, subject to the recorded source/schema compatibility checks.
+
+## Modal training
+
+Training on Modal is headless and uses one terminal. Build the skill bank first as described above, then upload it, check the remote configuration, and train using the returned dataset ID. This example runs P1; replace the config and run ID for another task:
+
+```bash
+set -euo pipefail
+CONFIG=ather_exploration/resources/training/skills_p1.yaml
+RUN_ID=skills-p1-$(date +%Y%m%d-%H%M%S)
+UPLOAD_OUTPUT=$(.venv/bin/python -m ather_exploration.training.modal_io upload --config "$CONFIG")
+export ATHER_DATASET=$(printf '%s\n' "$UPLOAD_OUTPUT" | .venv/bin/python -c 'import json,sys; print(json.loads(sys.stdin.read().splitlines()[-1])["dataset"])')
+
+.venv/bin/python -m modal run -m ather_exploration.training.modal_app \
+  --command check --config "$CONFIG" --dataset "$ATHER_DATASET"
+.venv/bin/python -m modal run -m ather_exploration.training.modal_app \
+  --command train --config "$CONFIG" --dataset "$ATHER_DATASET" --run-id "$RUN_ID"
+
+.venv/bin/python -m ather_exploration.training.modal_io download \
+  --run-id "$RUN_ID" --output "artifacts/modal/$RUN_ID"
+.venv/bin/python -m ather_exploration ui \
+  --checkpoint-dir "artifacts/modal/$RUN_ID"
+```
+
+If upload or remote check fails, stop there and fix the reported issue before training. Re-upload after source or config changes; use a new run ID for each run. Metrics are logged to W&B and local run files. P4's current config is `ather_exploration/resources/training/skills_p4_balanced.yaml`; its training-start checkpoint and thresholds are experiment-specific, so verify them against the artifacts and config before launching.
+
+
+## Current limitations against the assignment
+
+The remaining items reflect the project's current compute and development-time limits and are still required for full compliance.
+
+- The Python viewer is autoplay-only: it does not currently accept a typed/random seed in the window, edit environment parameters, pause, or step the policy manually. Set the initial seed/FPS via CLI; `New map` increments the seed. This does **not** yet meet every UI control requested in assignment §8.
+- P4 skill evaluation currently uses a fixed validation pool; it has no independent held-out P4 split. Multi-training-seed mean/variation and held-out final results are still needed before claiming final generalization.
+- The map preview covers P1–P4 but not P5 target-bank maps.
+- The multi-room `room_exploration` reward uses room-coverage information unavailable in the agent's observation. That is a privileged-reward issue against assignment §4 and must be resolved before describing those runs as fully compliant.
+- P4 thresholds are exploratory, and previous P3/P4 pilots showed incomplete exploration and weak yield/threat behavior. Gate passage alone does not establish final task performance.
+- Model checkpoints and experiment artifacts are not stored in Git. The full `artifacts/` directory will be uploaded separately to the [Drive artifacts folder](https://drive.google.com/drive/u/2/folders/1Cw4dGizwmsfqtLVQBDoo5njk7tA4sG08); include the exact run/config/checkpoint/evaluation paths in the final handoff. The demo still needs to be recorded, and the prebuilt no-retraining package is not yet documented as complete.
+- Current README examples do not establish formal assignment completion: final held-out comparisons across multiple independent training seeds, mean/variation, final latency report, and a complete demo/package handoff still need to be produced and linked.
 
 ## Code map
 
