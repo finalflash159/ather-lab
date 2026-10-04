@@ -23,6 +23,7 @@ class SessionSpec:
     checkpoint: str | None = None
     deterministic: bool = True
     replay: str | None = None
+    diagnostic_source_mismatch: bool = False
 
 
 class EpisodeSession:
@@ -62,7 +63,11 @@ class EpisodeSession:
             if spec.checkpoint and not spec.config_path:
                 from ather_exploration.training.checkpoints import inspect_checkpoint
 
-                _, metadata = inspect_checkpoint(spec.checkpoint, inference=True)
+                _, metadata = inspect_checkpoint(
+                    spec.checkpoint,
+                    inference=True,
+                    diagnostic_source_mismatch=spec.diagnostic_source_mismatch,
+                )
                 stored = metadata.get("environment_configs", {}).get(spec.preset)
                 if stored is not None:
                     config = EnvConfig.model_validate(stored)
@@ -89,7 +94,11 @@ class EpisodeSession:
                     raise ValueError("Select a READY checkpoint directory")
                 from ather_exploration.training.checkpoints import load_agent
 
-                self.agent = load_agent(spec.checkpoint, self.env.observation_space)
+                self.agent = load_agent(
+                    spec.checkpoint,
+                    self.env.observation_space,
+                    diagnostic_source_mismatch=spec.diagnostic_source_mismatch,
+                )
                 if spec.agent != "checkpoint" and self.agent.name != spec.agent:
                     raise ValueError("Selected agent differs from checkpoint architecture")
             core = self.env.unwrapped
