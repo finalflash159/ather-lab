@@ -162,7 +162,7 @@ The remaining items reflect the project's current compute and development-time l
 - The map preview covers P1–P4 but not P5 target-bank maps.
 - The multi-room `room_exploration` reward uses room-coverage information unavailable in the agent's observation. That is a privileged-reward issue against assignment §4 and must be resolved before describing those runs as fully compliant.
 - P4 thresholds are exploratory, and previous P3/P4 pilots showed incomplete exploration and weak yield/threat behavior. Gate passage alone does not establish final task performance.
-- Model checkpoints and experiment artifacts are not stored in Git. The full `artifacts/` directory will be uploaded separately to the [Drive artifacts folder](https://drive.google.com/drive/u/2/folders/1Cw4dGizwmsfqtLVQBDoo5njk7tA4sG08); include the exact run/config/checkpoint/evaluation paths in the final handoff. The demo still needs to be recorded, and the prebuilt no-retraining package is not yet documented as complete.
+- Model checkpoints and experiment artifacts are not stored in Git. The full `artifacts/` directory will be uploaded separately to the [Drive artifacts folder](https://drive.google.com/drive/u/0/folders/1kAn-TbmPx4LoE0gRh7adpzu0rT-XO39I); include the exact run/config/checkpoint/evaluation paths in the final handoff. The demo still needs to be recorded, and the prebuilt no-retraining package is not yet documented as complete.
 - Current README examples do not establish formal assignment completion: final held-out comparisons across multiple independent training seeds, mean/variation, final latency report, and a complete demo/package handoff still need to be produced and linked.
 
 ## Code map
